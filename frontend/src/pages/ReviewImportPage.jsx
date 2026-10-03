@@ -5,7 +5,7 @@ import Loading from "../components/Loading";
 import TransactionForm from "../components/TransactionForm";
 import { useApi } from "../hooks/useApi";
 import { importService } from "../services/importService";
-import { formatDateTime } from "../utils/format";
+import { formatCurrency, formatDateTime } from "../utils/format";
 
 // Which form fields to highlight for each kind of parser issue.
 function fieldsToHighlight(issues) {
@@ -25,6 +25,7 @@ export default function ReviewImportPage() {
   const [conflict, setConflict] = useState(null); // { message, existingId, similar, payload }
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [chosenAmount, setChosenAmount] = useState(null); // picked from the amount candidates
 
   const save = async (payload, allowSimilar = false) => {
     try {
@@ -79,8 +80,10 @@ export default function ReviewImportPage() {
   }
 
   const parsed = pending.parsed_data;
+  const candidates = parsed.amount_candidates || [];
   const initialValues = {
     ...parsed,
+    amount: chosenAmount ?? parsed.amount,
     payment_method: parsed.payment_method || "UPI",
     category: parsed.category || "Other",
     notes: parsed.message && !/^upi\s*intent$/i.test(parsed.message) ? parsed.message : "",
@@ -142,8 +145,29 @@ export default function ReviewImportPage() {
         </Alert>
       )}
 
+      {candidates.length > 1 && (
+        <section className="card">
+          <h2>Which amount is right?</h2>
+          <p className="muted small">Tap the amount shown on your PhonePe receipt.</p>
+          <div className="choice-row">
+            {candidates.map((candidate) => (
+              <button
+                key={candidate}
+                type="button"
+                className={`btn choice ${chosenAmount === candidate ? "btn-primary" : "btn-secondary"}`}
+                aria-pressed={chosenAmount === candidate}
+                onClick={() => setChosenAmount(candidate)}
+              >
+                {formatCurrency(candidate)}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="card">
         <TransactionForm
+          key={chosenAmount || "parsed"} // re-fill the form when an amount is picked
           initialValues={initialValues}
           onSubmit={(payload) => {
             setConflict(null);

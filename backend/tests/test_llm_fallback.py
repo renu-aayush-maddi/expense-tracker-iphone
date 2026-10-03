@@ -239,3 +239,61 @@ def test_confirmed_review_marked_as_reviewed(client, auth_headers, fake_llm):
                "phonepe_transaction_id": "T2610031311415776289288"}
     body = client.post(f"/api/imports/pending/{review_id}/confirm", json=payload, headers=auth_headers).json()
     assert body["extraction_method"] == "reviewed"
+
+
+# ---------------------------------------------------------------- ₹ misread as a leading "2"
+# Real OCR from a ₹1,420.25 Delhivery payment: the ₹ came out as "2" in both places.
+DELHIVERY_OCR = """Transaction Successful
+1 October 2026 at 8:10 PM
+Paid to
+7
+Delhivery Limited
+paytm-delhivery123@pt...
+21,420.25
+囯
+Payment Details
+PhonePe Transaction ID
+T2610012010462905056412
+Debited from
+XXXXXXXX8426
+UTR: 844936168945
+21,420.25
+"""
+
+
+def test_rupee_as_2_ambiguous_case_asks_the_user():
+    result = parse(DELHIVERY_OCR)
+    assert result.data.amount is None
+    assert result.amount_candidates == [Decimal("1420.25"), Decimal("21420.25")]
+    assert result.rupee_ambiguous
+    assert "₹1,420.25 or ₹21,420.25" in result.issues[0]
+    # Everything else is still read correctly; the logo letter "7" is ignored.
+    assert result.data.merchant_name == "Delhivery Limited"
+    assert result.data.transaction_time == time(20, 10)
+    assert result.data.account_last4 == "8426"
+
+
+@pytest.mark.parametrize(
+    "ocr_amount, expected",
+    [
+        ("2183", "183.00"),  # ₹2,183 would have a comma -> the 2 is the ₹
+        ("2999.50", "999.50"),
+        ("212,420", "12420.00"),  # "212,420" isn't Indian grouping -> ₹12,420
+        ("22,15,000", "215000.00"),  # ₹2,15,000
+        ("2,183", "2183.00"),  # ",183" is impossible -> real ₹2,183 (₹ dropped)
+        ("¥21,420.25", "21420.25"),  # a symbol is there, so the 2 is a real digit
+        ("Z1,420.25", "1420.25"),
+        ("1,420.25", "1420.25"),
+    ],
+)
+def test_rupee_as_2_decided_by_digit_grouping(ocr_amount, expected):
+    result = parse(DELHIVERY_OCR.replace("21,420.25", ocr_amount))
+    assert result.data.amount == Decimal(expected), result.issues
+
+
+def test_rupee_as_2_never_sent_to_llm(client, auth_headers, fake_llm):
+    fake_llm.answer = answer(amount="21,420.25", merchant="Delhivery Limited", day="2026-10-01", at="20:10")
+    body = client.post(URL, json={"ocr_text": DELHIVERY_OCR}, headers=auth_headers).json()
+    assert body["status"] == "review_required"
+    assert body["parsed_data"]["amount_candidates"] == ["1420.25", "21420.25"]
+    assert fake_llm.calls == 0  # the LLM guessed wrong on this exact receipt; it isn't asked any more

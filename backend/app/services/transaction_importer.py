@@ -13,7 +13,6 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,7 +21,14 @@ from sqlalchemy.orm import Session
 from app.core.constants import SOURCE_PHONEPE
 from app.models import BankAccount, PendingImport, Transaction
 from app.services import categorizer, duplicate_detector, llm_extractor, transaction_service
-from app.services.parsing import METHOD_AI, METHOD_REVIEWED, ParsedTransaction, ParseResult, validate_result
+from app.services.parsing import (
+    METHOD_AI,
+    METHOD_REVIEWED,
+    ParsedTransaction,
+    ParseResult,
+    format_inr,
+    validate_result,
+)
 from app.services.phonepe_parser import parse_phonepe_receipt, useful_message
 from app.services.transaction_service import DuplicateTransactionError
 
@@ -52,23 +58,6 @@ class ImportOutcome:
     pending: PendingImport | None = None
 
 
-def format_inr(amount: Decimal) -> str:
-    """183 -> '₹183', 12450.5 -> '₹12,450.50', 125000 -> '₹1,25,000' (Indian grouping)."""
-    amount = Decimal(amount).quantize(Decimal("0.01"))
-    rupees, paise = divmod(amount, 1)
-    digits = str(int(rupees))
-    if len(digits) > 3:
-        head, tail = digits[:-3], digits[-3:]
-        groups = []
-        while len(head) > 2:
-            groups.insert(0, head[-2:])
-            head = head[:-2]
-        if head:
-            groups.insert(0, head)
-        digits = ",".join(groups + [tail])
-    return f"₹{digits}" + (f".{int(paise * 100):02d}" if paise else "")
-
-
 def _lookup_bank(db: Session, user_id: uuid.UUID, account_last4: str | None) -> str | None:
     if not account_last4:
         return None
@@ -91,14 +80,16 @@ def apply_llm_fallback(result: ParseResult, raw_text: str, today: date) -> None:
     """Fill missing amount/merchant/date/time from the LLM, after verifying each
     value against the OCR text, then re-validate. Mutates `result`."""
     d = result.data
-    if d.amount is not None and d.merchant_name and d.transaction_date is not None:
-        return  # nothing the LLM can help with (e.g. only the IDs are missing)
+    amount_fillable = d.amount is None and not result.rupee_ambiguous
+    if not amount_fillable and d.merchant_name and d.transaction_date is not None:
+        return  # nothing the LLM can help with (e.g. only the IDs, or the ₹-vs-2 question, remain)
     answer = llm_extractor.extract(raw_text)
     if answer is None:
         return
 
     filled = []
-    if d.amount is None:
+    # "Is the leading 2 a misread ₹?" can't be answered from text – not by the LLM either.
+    if d.amount is None and not result.rupee_ambiguous:
         amount = llm_extractor.to_amount(answer.amount)
         # The amount must be a number that's really in the text (not an ID, date or time),
         # and one of the parser's candidates if it found several.

@@ -820,6 +820,17 @@ textarea {
   background: var(--hover);
   text-decoration: none;
 }
+.choice-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.choice {
+  font-size: 1.15rem;
+  padding: 12px 20px;
+  font-variant-numeric: tabular-nums;
+}
 .steps {
   padding-left: 20px;
   margin: 8px 0;

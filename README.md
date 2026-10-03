@@ -76,7 +76,7 @@ expense-tracker/
 │   │   ├── services/       # business logic: parsers, importer, categorizer, duplicates, stats
 │   │   └── main.py         # FastAPI app, CORS, error handlers, security headers
 │   ├── alembic/            # database migrations
-│   ├── tests/              # pytest suite (148 tests)
+│   ├── tests/              # pytest suite (158 tests)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -290,7 +290,7 @@ Against real PostgreSQL (recommended before deploying):
 TEST_DATABASE_URL=postgresql://YOUR_USER@localhost:5432/expense_tracker_test pytest
 ```
 
-What's covered (148 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; import tokens; request size limits; dashboard maths.
+What's covered (158 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, ₹ read as a leading `2`, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; import tokens; request size limits; dashboard maths.
 
 ---
 
@@ -509,7 +509,18 @@ After a parser improvement, or after adding `OPENAI_API_KEY`, click **Retry all*
 
 Sharing the same receipt again (even if the OCR text comes out slightly different) updates the same review instead of creating a second one, because reviews are matched by transaction ID/UTR as well as by text.
 
-**Known limit:** if OCR turns ₹ into the digit `2` (₹183 → `2183`), the text really says 2183 and neither the parser nor the AI can know otherwise. Check amounts that look too large and edit them.
+**When ₹ is read as a `2`:** PhonePe always prints ₹ before the amount, so an amount with *no* symbol most likely lost its ₹ to a leading `2`. PhonePe also always uses Indian digit grouping, which usually settles it automatically:
+
+| OCR text | Saved as | Why |
+|---|---|---|
+| `2183` | ₹183 | ₹2,183 would have been printed with a comma |
+| `212,420` | ₹12,420 | `212,420` isn't valid Indian grouping |
+| `22,15,000` | ₹2,15,000 | ₹22 lakh is over the ₹10 lakh sanity limit |
+| `2,183` | ₹2,183 | `,183` can't be an amount, so the 2 is real |
+| `¥21,420.25` | ₹21,420.25 | a symbol is present, so the 2 is a real digit |
+| `21,420.25` | **asks you** | ₹1,420.25 and ₹21,420.25 are both valid |
+
+The last case (real amounts of ₹1,000–₹9,999) can't be decided from text, so it isn't sent to the AI either. The review screen shows both amounts as buttons; tap the one on your receipt.
 
 ---
 

@@ -43,7 +43,7 @@ import unicodedata
 from datetime import date, time
 from decimal import Decimal, InvalidOperation
 
-from app.services.parsing import ParsedTransaction, ParseResult, validate_result
+from app.services.parsing import MAX_AMOUNT, ParsedTransaction, ParseResult, validate_result
 
 VALUE_WINDOW = 3  # how many lines after a label we look for its value
 
@@ -72,8 +72,10 @@ NUMBER = r"(?:\d{1,3}(?:,\d{2,3})+|\d{1,9})(?:\.\d{1,2})?(?!\d)"
 MARKED_AMOUNT_RE = re.compile(CURRENCY_MARKER + r"\s*(" + NUMBER + r")", re.I)
 # A value that is just an amount, maybe with a misread ₹ in front (Z, %, ?, *, F, R...).
 AMOUNT_ONLY_RE = re.compile(
-    r"^(?:" + CURRENCY_MARKER + r"|[^\w\s]{1,2}|[A-Za-z]{1,2})?\s*(" + NUMBER + r")\s*(?:/-)?$", re.I
+    r"^(?P<prefix>" + CURRENCY_MARKER + r"|[^\w\s]{1,2}|[A-Za-z]{1,2})?\s*(?P<number>" + NUMBER + r")\s*(?:/-)?$", re.I
 )
+# PhonePe prints amounts with Indian digit grouping: 183 / 2,183 / 21,420.25 / 1,25,000
+INDIAN_FORMAT_RE = re.compile(r"^(?:[1-9]\d{0,2}|[1-9]\d?(?:,\d{2})*,\d{3})(?:\.\d{1,2})?$")
 
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -170,12 +172,51 @@ def _to_decimal(number: str) -> Decimal | None:
         return None
 
 
-def _parse_amount_only(value: str) -> Decimal | None:
-    """'¥183', 'Z 1,250.50', '183' -> Decimal; anything else -> None."""
+def _match_amount_only(value: str) -> re.Match | None:
     # OCR sometimes inserts spaces inside numbers: "1, 250" / "₹ 1 250.00"
     compact = re.sub(r"(?<=\d)\s+(?=[\d,.])|(?<=[,.])\s+(?=\d)", "", value.strip())
-    match = AMOUNT_ONLY_RE.match(compact)
-    return _to_decimal(match.group(1)) if match else None
+    return AMOUNT_ONLY_RE.match(compact)
+
+
+def _parse_amount_only(value: str) -> Decimal | None:
+    """'¥183', 'Z 1,250.50', '183' -> Decimal; anything else -> None."""
+    match = _match_amount_only(value)
+    return _to_decimal(match.group("number")) if match else None
+
+
+def _amount_readings(value: str) -> set[Decimal]:
+    """All plausible amounts for an amount-only value.
+
+    PhonePe always prints ₹ before the amount. If OCR shows a symbol or letter
+    there ('¥183', 'Z183') that's the ₹ and the number is unambiguous. If OCR
+    shows NO symbol, the ₹ was most likely misread as a leading '2'. Indian
+    digit grouping usually tells which reading is right:
+
+        '2183'      -> {183}              (₹2,183 would be printed with a comma)
+        '212,420'   -> {12420}            ('212,420' isn't valid Indian grouping)
+        '2,183'     -> {2183}             (',183' can't be an amount)
+        '21,420.25' -> {1420.25, 21420.25}  genuinely ambiguous -> ask the user
+    """
+    match = _match_amount_only(value)
+    if not match:
+        return set()
+    number = match.group("number")
+    literal = _to_decimal(number)
+    if match.group("prefix") or not number.startswith("2") or len(number) < 2 or number[1] in ",.":
+        return {literal}
+
+    stripped = number[1:]
+    as_is_ok = bool(INDIAN_FORMAT_RE.match(number))
+    stripped_ok = bool(INDIAN_FORMAT_RE.match(stripped))
+    readings = set()
+    if as_is_ok:
+        readings.add(literal)
+    if stripped_ok:
+        readings.add(_to_decimal(stripped))
+    readings = readings or {literal, _to_decimal(stripped)}  # neither fits (commas lost): ambiguous
+    # Prefer readings under the sanity limit: '22,15,000' -> ₹2,15,000, not ₹22,15,000.
+    plausible = {r for r in readings if r <= MAX_AMOUNT}
+    return plausible or readings
 
 
 def _looks_like_date_or_time(value: str) -> bool:
@@ -418,14 +459,27 @@ def _pick(candidates: set[Decimal], result: ParseResult, warning: str | None = N
     return False
 
 
+def _combine_readings(readings: list[set[Decimal]]) -> tuple[set[Decimal], bool]:
+    """The same amount usually appears twice (merchant row and account row).
+    Keep the readings every occurrence agrees on. Returns (candidates, rupee_ambiguous)."""
+    if not readings:
+        return set(), False
+    common = set.intersection(*readings)
+    candidates = common or set.union(*readings)
+    rupee_ambiguous = bool(common) and len(common) > 1  # one number, two readings (₹ vs '2')
+    return candidates, rupee_ambiguous
+
+
 def _extract_amount(lines: list[str], result: ParseResult) -> None:
     masked = _mask_lines(lines, result.data)
 
     # a) Value right after an "Amount" label.
     for _, value in _candidates_after(masked, "amount"):
-        amount = _parse_amount_only(value)
-        if amount is not None and amount > 0:
-            result.data.amount = amount.quantize(Decimal("0.01"))
+        readings = {r for r in _amount_readings(value) if r > 0}
+        if readings:
+            candidates, rupee_ambiguous = _combine_readings([readings])
+            result.rupee_ambiguous = rupee_ambiguous
+            _pick(candidates, result)
             return
 
     # b) Numbers with an explicit currency marker (₹ and its OCR look-alikes).
@@ -439,14 +493,22 @@ def _extract_amount(lines: list[str], result: ParseResult) -> None:
         return
 
     # c) Lines that contain only a number, maybe with a misread ₹ in front.
-    bare = set()
+    readings = []
     for line in masked:
         if _label_of(line):
             continue
-        value = _parse_amount_only(line)
-        if value and not (2000 <= value <= 2100 and value == value.to_integral()):  # skip lone years
-            bare.add(value)
-    _pick(bare, result, "The currency symbol was unreadable; amount taken from a number-only line.")
+        options = {r for r in _amount_readings(line) if r > 0}
+        if not options:
+            continue
+        literal = _parse_amount_only(line)
+        if literal < 10 and literal == literal.to_integral() and len(options) == 1:
+            continue  # a lone digit is a logo/icon letter, not an amount ("Paid to / 7 / Delhivery")
+        if 2000 <= literal <= 2100 and literal == literal.to_integral():
+            continue  # a lone year
+        readings.append(options)
+    candidates, rupee_ambiguous = _combine_readings(readings)
+    result.rupee_ambiguous = rupee_ambiguous
+    _pick(candidates, result, "The currency symbol was unreadable; amount taken from a number-only line.")
 
 
 def _extract_message(lines: list[str], result: ParseResult) -> None:

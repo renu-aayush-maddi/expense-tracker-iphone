@@ -47,6 +47,9 @@ class ParseResult:
     warnings: list[str] = field(default_factory=list)
     # Distinct amounts seen when the parser couldn't decide between them.
     amount_candidates: list[Decimal] = field(default_factory=list)
+    # True when the only doubt is whether a leading "2" is really a misread ₹
+    # (e.g. "21,420.25" = ₹1,420.25 or ₹21,420.25?). Only the user can settle that.
+    rupee_ambiguous: bool = False
     empty_text: bool = False
 
     @property
@@ -71,7 +74,25 @@ class ParseResult:
                 value = str(value)
             result[key] = value
         result["warnings"] = list(self.warnings)
+        result["amount_candidates"] = [str(a) for a in self.amount_candidates]
         return result
+
+
+def format_inr(amount: Decimal) -> str:
+    """183 -> '₹183', 12450.5 -> '₹12,450.50', 125000 -> '₹1,25,000' (Indian grouping)."""
+    amount = Decimal(amount).quantize(Decimal("0.01"))
+    rupees, paise = divmod(amount, 1)
+    digits = str(int(rupees))
+    if len(digits) > 3:
+        head, tail = digits[:-3], digits[-3:]
+        groups = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            groups.insert(0, head)
+        digits = ",".join(groups + [tail])
+    return f"₹{digits}" + (f".{int(paise * 100):02d}" if paise else "")
 
 
 def validate_result(result: ParseResult, today: date, require_identifier: bool = True) -> ParseResult:
@@ -87,7 +108,13 @@ def validate_result(result: ParseResult, today: date, require_identifier: bool =
         issues.append("The receipt text is empty.")
 
     if d.amount is None:
-        if len(result.amount_candidates) > 1:
+        if result.rupee_ambiguous and len(result.amount_candidates) == 2:
+            low, high = sorted(result.amount_candidates)
+            issues.append(
+                f"The ₹ sign may have been read as a '2'. Is the amount {format_inr(low)} or {format_inr(high)}? "
+                "Pick the right one."
+            )
+        elif len(result.amount_candidates) > 1:
             listed = ", ".join(str(a) for a in sorted(result.amount_candidates))
             issues.append(f"Several different amounts were found: {listed}.")
         else:
