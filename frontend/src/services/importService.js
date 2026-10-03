@@ -12,6 +12,7 @@ export const importService = {
     }
   },
   listPending: () => apiRequest("/api/imports/pending"),
+  reprocessPending: () => apiRequest("/api/imports/pending/reprocess", { method: "POST" }),
   getPending: (id) => apiRequest(`/api/imports/pending/${id}`),
   confirmPending: (id, data, allowSimilar = false) =>
     apiRequest(`/api/imports/pending/${id}/confirm`, {

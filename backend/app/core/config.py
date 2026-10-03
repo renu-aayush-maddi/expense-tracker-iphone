@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:5173"  # comma separated
     MAX_REQUEST_BYTES: int = 64 * 1024  # 64 KB is plenty for OCR text
 
+    # --- LLM fallback for hard-to-read receipts (optional) ---
+    OPENAI_API_KEY: str | None = None  # leave empty to disable the fallback
+    OPENAI_MODEL: str = "gpt-5.4-mini"
+    LLM_FALLBACK_ENABLED: bool = True
+    LLM_TIMEOUT_SECONDS: float = 20.0
+
     # --- Rate limits (requests per minute) ---
     IMPORT_RATE_LIMIT_PER_MINUTE: int = 30
     LOGIN_RATE_LIMIT_PER_MINUTE: int = 10

@@ -57,6 +57,8 @@ class Transaction(Base):
     account_last4: Mapped[str | None] = mapped_column(String(4))
 
     raw_ocr_text: Mapped[str | None] = mapped_column(Text)
+    # How an imported transaction was read: "rules", "ai" (LLM helped) or "reviewed" (confirmed by you).
+    extraction_method: Mapped[str | None] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(30), nullable=False, default=SOURCE_MANUAL)
     notes: Mapped[str | None] = mapped_column(Text)
 

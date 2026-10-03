@@ -14,12 +14,13 @@ os.environ["JWT_SECRET"] = "test-secret-that-is-definitely-longer-than-32-charac
 os.environ["ENVIRONMENT"] = "test"
 os.environ["ALLOW_REGISTRATION"] = "true"
 os.environ["CORS_ORIGINS"] = "http://localhost:5173"
+os.environ["OPENAI_API_KEY"] = ""  # tests never call the real LLM; they mock it
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api.auth import login_limiter
-from app.api.imports import import_limiter
+from app.api.imports import import_limiter, reprocess_limiter
 from app.db.base import Base
 from app.db.session import engine
 from app.main import app  # also imports every model
@@ -64,6 +65,7 @@ def clean_tables():
             connection.execute(table.delete())
     login_limiter.reset()
     import_limiter.reset()
+    reprocess_limiter.reset()
 
 
 @pytest.fixture

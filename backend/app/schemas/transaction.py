@@ -110,6 +110,7 @@ class TransactionOut(BaseModel):
     utr: str | None
     account_last4: str | None
     source: str
+    extraction_method: str | None
     notes: str | None
     created_at: datetime
     updated_at: datetime

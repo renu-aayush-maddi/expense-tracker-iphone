@@ -54,6 +54,28 @@ export default function ImportPage() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const pending = useApi(() => importService.listPending(), []);
+  const [retrying, setRetrying] = useState(false);
+  const [retryResult, setRetryResult] = useState("");
+
+  // Re-run every pending import through the latest parser (+ AI fallback).
+  const handleRetryAll = async () => {
+    setRetrying(true);
+    setRetryResult("");
+    setError("");
+    try {
+      const counts = await importService.reprocessPending();
+      const parts = [];
+      if (counts.created) parts.push(`${counts.created} saved`);
+      if (counts.duplicate) parts.push(`${counts.duplicate} already existed`);
+      if (counts.review_required) parts.push(`${counts.review_required} still need review`);
+      setRetryResult(parts.length ? parts.join(", ") + "." : "Nothing changed.");
+      pending.reload();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   const handleImport = async (event) => {
     event.preventDefault();
@@ -88,7 +110,19 @@ export default function ImportPage() {
       </div>
 
       <section className="card">
-        <h2>Imports waiting for review</h2>
+        <div className="card-header">
+          <h2>Imports waiting for review</h2>
+          {pending.data?.length > 0 && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={handleRetryAll} disabled={retrying}>
+              {retrying ? "Retrying…" : "Retry all"}
+            </button>
+          )}
+        </div>
+        {retryResult && (
+          <Alert type="success" onClose={() => setRetryResult("")}>
+            {retryResult}
+          </Alert>
+        )}
         {pending.loading && <Loading />}
         {pending.error && <Alert type="error">{pending.error.message}</Alert>}
         {pending.data && pending.data.length === 0 && <p className="empty">Nothing to review. 🎉</p>}

@@ -35,6 +35,10 @@ services:
         value: Asia/Kolkata
       - key: ENABLE_DOCS
         value: "true"
+      - key: OPENAI_API_KEY
+        sync: false # optional: AI fallback for hard-to-read receipts
+      - key: OPENAI_MODEL
+        value: gpt-5.4-mini
 
   # ---------------- Frontend: React (Render Static Site) ----------------
   - type: web

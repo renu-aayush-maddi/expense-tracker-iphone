@@ -6,13 +6,20 @@ PhonePe changes its receipt layout only this file needs updating.
 How it works
 ------------
 1. Clean the text and split it into non-empty lines.
-2. Find label lines ("Paid to", "Amount", "Date", "Transaction ID", "UTR",
-   "Debited from", "Message"). The value is either on the same line after the
-   label, or on one of the next few lines.
-3. Each field has its own validator, so e.g. the amount search never picks up a
-   transaction ID, UTR, account number or date.
-4. Anything uncertain is reported in `issues` -> the importer asks for review
-   instead of saving wrong data.
+2. Extract the identifiers first (transaction ID, UTR, account, date/time).
+   The value of a label ("UTR:") is on the same line or one of the next lines.
+3. Build a *masked* copy of the text where every identifier, date and time is
+   blanked out. The amount is searched only in the masked text, so it can never
+   be confused with an ID, UTR, account number or date – even when they share
+   a line (e.g. "XXXXXX6929   ¥183").
+4. Amount, in order of confidence:
+      a) the value after an "Amount" label
+      b) a number with a currency marker – ₹ and its usual OCR misreads
+         (¥ 円 € £ $ Rs INR)
+      c) a line that is only a number, possibly with one stray symbol/letter
+         where ₹ was misread ("Z183", "%183", "183")
+   If a level finds several different amounts, nothing is guessed.
+5. `validate_result` turns anything uncertain into review issues.
 
 Typical OCR (₹ is often read as ¥):
 
@@ -29,19 +36,15 @@ Typical OCR (₹ is often read as ¥):
     XXXXXX096929
     UTR:
     706226593892
-    Message:
-    UPIIntent
 """
 
 import re
 import unicodedata
-from datetime import date, time, timedelta
+from datetime import date, time
 from decimal import Decimal, InvalidOperation
 
-from app.services.parsing import ParsedTransaction, ParseResult
+from app.services.parsing import ParsedTransaction, ParseResult, validate_result
 
-MAX_AMOUNT = Decimal("1000000")  # ₹10 lakh – anything bigger is almost certainly an OCR error
-EARLIEST_YEAR = 2016  # PhonePe launched in 2016
 VALUE_WINDOW = 3  # how many lines after a label we look for its value
 
 # ---------------------------------------------------------------------------
@@ -52,9 +55,7 @@ LABELS: dict[str, re.Pattern] = {
     "received_from": re.compile(r"^received\s*fr[o0]m\b[:\s]*", re.I),
     "amount": re.compile(r"^(total\s*)?(amount|amt)(\s*paid)?\b\s*[:.\-]?\s*", re.I),
     "date": re.compile(r"^date(\s*(&|and)\s*time)?\b\s*[:.\-]?\s*", re.I),
-    "transaction_id": re.compile(
-        r"^(phone\s*pe\s*)?(transaction|txn)\s*[i1l|]\s*d\b\s*[:.\-]?\s*", re.I
-    ),
+    "transaction_id": re.compile(r"^(phone\s*pe\s*)?(transaction|txn)\s*[i1l|]\s*d\b\s*[:.\-]?\s*", re.I),
     "debited_from": re.compile(r"^(debited|paid)\s*fr[o0]m\b\s*[:.\-]?\s*", re.I),
     "utr": re.compile(r"^u\s*t\s*r(\s*n[o0]\.?|\s*number)?\b\s*[:.\-]?\s*", re.I),
     "upi_ref": re.compile(r"^upi\s*ref(erence)?\.?(\s*(n[o0]|number|id)\.?)?\s*[:.\-]?\s*", re.I),
@@ -64,14 +65,14 @@ LABELS: dict[str, re.Pattern] = {
 # ---------------------------------------------------------------------------
 # Value patterns
 # ---------------------------------------------------------------------------
-# Currency markers including common OCR misreads of ₹ (¥ is the most common).
-CURRENCY_MARKER = r"(?:₹|¥|₨|\bRs\.?|\bINR\b)"
+# ₹ plus the symbols OCR commonly turns it into.
+CURRENCY_MARKER = r"(?:₹|¥|円|₨|€|£|\$|\bRs\.?|\bRe\.?|\bINR\b)"
 # At most 9 integer digits, so long IDs/UTRs/account numbers can never look like an amount.
 NUMBER = r"(?:\d{1,3}(?:,\d{2,3})+|\d{1,9})(?:\.\d{1,2})?(?!\d)"
 MARKED_AMOUNT_RE = re.compile(CURRENCY_MARKER + r"\s*(" + NUMBER + r")", re.I)
-# A labelled amount value may start with a misread currency symbol (Z, %, ?, *, F, R...).
-LABELLED_AMOUNT_RE = re.compile(
-    r"^(?:" + CURRENCY_MARKER + r"|[^\w\s]|[A-Za-z]{1,2})?\s*(" + NUMBER + r")\s*(?:/-)?$", re.I
+# A value that is just an amount, maybe with a misread ₹ in front (Z, %, ?, *, F, R...).
+AMOUNT_ONLY_RE = re.compile(
+    r"^(?:" + CURRENCY_MARKER + r"|[^\w\s]{1,2}|[A-Za-z]{1,2})?\s*(" + NUMBER + r")\s*(?:/-)?$", re.I
 )
 
 MONTHS = {
@@ -87,6 +88,8 @@ TIME_24H_RE = re.compile(r"\b([01]?\d|2[0-3])\s*:\s*([0-5]\d)\b")
 PHONEPE_TXN_ID_RE = re.compile(r"T\d{15,30}")
 MASKED_ACCOUNT_RE = re.compile(r"[Xx×*•·]{2,}[\s\-]*([\dOo]{3,})")
 ACCOUNT_FALLBACK_RE = re.compile(r"\b(?:a/?c|acct|account)\s*(?:no\.?|number)?\s*[:\-]?\s*[Xx×*•]*\s*(\d{4,})", re.I)
+# A UPI handle: "name@bank", or a lowercase handle whose "@bank" part was cut off ("uber187204.rzp").
+UPI_HANDLE_RE = re.compile(r"^(?:[\w.\-]+@[\w.\-]+|(?=[a-z0-9._\-]*[\d.])[a-z0-9._\-]{6,})$")
 
 KNOWN_BANKS = {
     "HDFC": ["hdfc"],
@@ -119,6 +122,7 @@ GENERIC_MESSAGES = {"upiintent", "upi", "payment", "pay", "paymentfromphonepe", 
 # Helpers
 # ---------------------------------------------------------------------------
 def _clean_lines(text: str) -> list[str]:
+    # NFKC also turns the full-width yen "￥" into a plain "¥".
     text = unicodedata.normalize("NFKC", text)
     lines = []
     for raw in text.replace("\r", "\n").split("\n"):
@@ -136,8 +140,8 @@ def _label_of(line: str) -> str | None:
 
 
 def _candidates_after(lines: list[str], label: str) -> list[tuple[int, str]]:
-    """For every occurrence of `label`, yield the same-line remainder (if any)
-    and the next few lines that aren't themselves labels. Returns (index, text)."""
+    """For every occurrence of `label`, return the same-line remainder (if any)
+    and the next few lines that aren't themselves labels, as (index, text)."""
     pattern = LABELS[label]
     found: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
@@ -166,10 +170,11 @@ def _to_decimal(number: str) -> Decimal | None:
         return None
 
 
-def _parse_labelled_amount(value: str) -> Decimal | None:
+def _parse_amount_only(value: str) -> Decimal | None:
+    """'¥183', 'Z 1,250.50', '183' -> Decimal; anything else -> None."""
     # OCR sometimes inserts spaces inside numbers: "1, 250" / "₹ 1 250.00"
-    compact = re.sub(r"(?<=\d)[\s]+(?=[\d,.])|(?<=[,.])\s+(?=\d)", "", value.strip())
-    match = LABELLED_AMOUNT_RE.match(compact)
+    compact = re.sub(r"(?<=\d)\s+(?=[\d,.])|(?<=[,.])\s+(?=\d)", "", value.strip())
+    match = AMOUNT_ONLY_RE.match(compact)
     return _to_decimal(match.group(1)) if match else None
 
 
@@ -177,89 +182,106 @@ def _looks_like_date_or_time(value: str) -> bool:
     return bool(DATE_DMY_NAME_RE.search(value) or DATE_NUMERIC_RE.search(value) or TIME_12H_RE.search(value))
 
 
+def _spaced_pattern(identifier: str) -> str:
+    """'7062265' -> regex that also matches '706 2265' (OCR inserts spaces)."""
+    return r"\s*".join(re.escape(ch) for ch in identifier)
+
+
 # ---------------------------------------------------------------------------
-# Field extractors
+# Identifiers
 # ---------------------------------------------------------------------------
-def _extract_merchant(lines: list[str], result: ParseResult) -> None:
-    label = "paid_to"
-    if not any(LABELS["paid_to"].match(line) for line in lines) and any(
-        LABELS["received_from"].match(line) for line in lines
-    ):
-        label = "received_from"
-        result.data.direction = "credit"
-
-    if not any(LABELS[label].match(line) for line in lines):
-        return
-
-    upi_id_fallback = None
-    for _, value in _candidates_after(lines, label):
-        if not re.search(r"[A-Za-z]{2,}", value):
-            continue  # needs letters
-        if MARKED_AMOUNT_RE.search(value) or _looks_like_date_or_time(value):
+def _extract_transaction_id(lines: list[str], result: ParseResult) -> None:
+    for _, value in _candidates_after(lines, "transaction_id"):
+        compact = re.sub(r"\s+", "", value)
+        if not compact:
             continue
-        if "@" in value:  # a UPI ID like name@okaxis – use only if nothing better
-            upi_id_fallback = upi_id_fallback or value
-            continue
-        result.data.merchant_name = _clean_merchant(value, result)
-        return
-    if upi_id_fallback:
-        result.data.merchant_name = upi_id_fallback.strip()
-
-
-def _clean_merchant(value: str, result: ParseResult) -> str:
-    truncated = bool(re.search(r"(\.{2,}|…)\s*$", value))
-    name = re.sub(r"(\.{2,}|…)\s*$", "", value)
-    name = re.sub(r"\s+", " ", name).strip(" -:,.'\"")
-    if truncated:
-        result.warnings.append("Merchant name looks truncated on the receipt.")
-    return name[:255]
-
-
-def _extract_amount(lines: list[str], skip_lines: set[int], result: ParseResult) -> None:
-    # 1) Contextual: the value right after an "Amount" label.
-    for index, value in _candidates_after(lines, "amount"):
-        if index in skip_lines:
-            continue
-        amount = _parse_labelled_amount(value)
-        if amount is not None:
-            result.data.amount = amount
-            break
-
-    # 2) Otherwise: numbers with an explicit currency marker (₹ ¥ Rs INR), on lines
-    #    that are not the value of an ID / UTR / account / date label.
-    if result.data.amount is None:
-        marked = set()
-        for i, line in enumerate(lines):
-            if i in skip_lines:
-                continue
-            for match in MARKED_AMOUNT_RE.finditer(line):
-                value = _to_decimal(match.group(1))
-                if value is not None:
-                    marked.add(value)
-        if len(marked) == 1:
-            result.data.amount = marked.pop()
-            result.warnings.append("Amount was found without an 'Amount' label.")
-        elif len(marked) > 1:
-            result.issues.append(
-                "Several different amounts were found: " + ", ".join(str(a) for a in sorted(marked)) + "."
-            )
+        candidate = compact[0].upper() + _fix_digits(compact[1:])
+        # OCR sometimes reads the leading "T" as "7" or "1".
+        if candidate[0] in "71" and candidate.isdigit() and 21 <= len(candidate) <= 24:
+            candidate = "T" + candidate[1:]
+            result.warnings.append("Transaction ID started with a digit; corrected the leading 'T'.")
+        if PHONEPE_TXN_ID_RE.fullmatch(candidate):
+            result.data.phonepe_transaction_id = candidate
             return
 
-    amount = result.data.amount
-    if amount is None:
-        result.issues.append("Amount could not be found.")
-    elif amount <= 0:
-        result.issues.append("Amount must be greater than zero.")
-        result.data.amount = None
-    elif amount > MAX_AMOUNT:
-        result.issues.append(f"Amount {amount} is unusually large; please confirm it.")
-    else:
-        result.data.amount = amount.quantize(Decimal("0.01"))
+    for line in lines:  # no label: look for a T + many digits token anywhere
+        match = PHONEPE_TXN_ID_RE.search(re.sub(r"\s+", "", line))
+        if match:
+            result.data.phonepe_transaction_id = match.group(0)
+            return
+
+
+def _looks_like_reference(value: str) -> bool:
+    """UPI UTRs are 12 digits; allow 10-22 digits, or bank-style alphanumeric refs
+    that are mostly digits. Masked account numbers (XXXX1234) and PhonePe
+    transaction IDs (T + digits) are rejected."""
+    if re.fullmatch(r"\d{10,22}", value):
+        return True
+    if re.search(r"X{3,}", value) or PHONEPE_TXN_ID_RE.fullmatch(value):
+        return False
+    return bool(re.fullmatch(r"[A-Z0-9]{12,22}", value)) and sum(c.isdigit() for c in value) >= 8
+
+
+def _extract_reference(lines: list[str], label: str) -> str | None:
+    for _, value in _candidates_after(lines, label):
+        compact = re.sub(r"[\s\-]", "", value).upper()
+        if not re.search(r"X{3,}", compact):
+            compact = _fix_digits(compact)
+        if _looks_like_reference(compact):
+            return compact
+    return None
+
+
+def _extract_account(lines: list[str], result: ParseResult) -> None:
+    candidates = _candidates_after(lines, "debited_from")
+    for index, value in candidates:
+        match = MASKED_ACCOUNT_RE.search(value)
+        if match:
+            digits = _fix_digits(match.group(1))
+            if digits.isdigit() and len(digits) >= 4:
+                result.data.account_last4 = digits[-4:]
+                # A bank name, if shown, sits right next to the account number.
+                result.data.bank = _detect_bank([v for i, v in candidates if i <= index + 1])
+                return
+
+    for line in lines:  # no label: any masked number / "A/c XXXX1234"
+        match = MASKED_ACCOUNT_RE.search(line) or ACCOUNT_FALLBACK_RE.search(line)
+        if match:
+            digits = _fix_digits(match.group(1))
+            if digits.isdigit() and len(digits) >= 4:
+                result.data.account_last4 = digits[-4:]
+                return
+
+    result.data.bank = _detect_bank([v for _, v in candidates[:2]])
+    result.warnings.append("Account number could not be found.")
+
+
+def _detect_bank(values: list[str]) -> str | None:
+    text = " " + " ".join(values).lower() + " "
+    for bank, keywords in KNOWN_BANKS.items():
+        for keyword in keywords:
+            if re.search(r"\b" + re.escape(keyword) + r"\b", text):
+                return bank
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Date & time
+# ---------------------------------------------------------------------------
+def _month_from_word(word: str) -> int | None:
+    word = word.lower().replace("0", "o")
+    return MONTHS.get(word[:3]) if word[:3].isalpha() else None
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 def _parse_date(value: str) -> date | None:
     value = re.sub(r"(?<=\d)[Oo](?=\d)", "0", value)
-
     for match in DATE_DMY_NAME_RE.finditer(value):
         day, month_word, year = match.groups()
         month = _month_from_word(month_word)
@@ -278,18 +300,6 @@ def _parse_date(value: str) -> date | None:
     return None
 
 
-def _month_from_word(word: str) -> int | None:
-    word = word.lower().replace("0", "o")
-    return MONTHS.get(word[:3]) if word[:3].isalpha() else None
-
-
-def _safe_date(year: int, month: int, day: int) -> date | None:
-    try:
-        return date(year, month, day)
-    except ValueError:
-        return None
-
-
 def _parse_time(value: str) -> time | None:
     match = TIME_12H_RE.search(value)
     if match:
@@ -306,119 +316,137 @@ def _parse_time(value: str) -> time | None:
     return None
 
 
-def _extract_date_time(lines: list[str], result: ParseResult, today: date) -> set[int]:
-    used: set[int] = set()
-    candidates = _candidates_after(lines, "date")
-    # If there's no "Date" label, search every line.
-    search_space = candidates or list(enumerate(lines))
+def _extract_date_time(lines: list[str], result: ParseResult) -> None:
+    # Prefer the "Date" label's value; without a label, search every line.
+    search_space = [v for _, v in _candidates_after(lines, "date")] or lines
 
-    for index, value in search_space:
+    for value in search_space:
         if result.data.transaction_date is None:
-            parsed = _parse_date(value)
-            if parsed:
-                result.data.transaction_date = parsed
-                used.add(index)
+            result.data.transaction_date = _parse_date(value)
         if result.data.transaction_time is None:
-            parsed_time = _parse_time(value)
-            if parsed_time:
-                result.data.transaction_time = parsed_time
-                used.add(index)
+            result.data.transaction_time = _parse_time(value)
 
     if result.data.transaction_time is None:
-        for i, line in enumerate(lines):  # time may live elsewhere, e.g. "on 3 Oct, 1:11 pm"
+        for line in lines:  # time may live elsewhere, e.g. "1:11 pm on 3 Oct 2026"
             if TIME_12H_RE.search(line):
                 result.data.transaction_time = _parse_time(line)
-                used.add(i)
                 break
 
-    txn_date = result.data.transaction_date
-    if txn_date is None:
-        result.issues.append("Transaction date could not be found.")
-    elif txn_date > today + timedelta(days=1):
-        result.issues.append(f"Transaction date {txn_date.isoformat()} is in the future.")
-    elif txn_date.year < EARLIEST_YEAR:
-        result.issues.append(f"Transaction date {txn_date.isoformat()} looks wrong.")
     if result.data.transaction_time is None:
         result.warnings.append("Transaction time could not be found.")
-    return used
 
 
-def _extract_transaction_id(lines: list[str], result: ParseResult) -> set[int]:
-    for index, value in _candidates_after(lines, "transaction_id"):
-        compact = re.sub(r"\s+", "", value)
-        if not compact:
+# ---------------------------------------------------------------------------
+# Merchant
+# ---------------------------------------------------------------------------
+def _extract_merchant(lines: list[str], result: ParseResult) -> None:
+    label = "paid_to"
+    has_paid_to = any(LABELS["paid_to"].match(line) for line in lines)
+    if not has_paid_to and any(LABELS["received_from"].match(line) for line in lines):
+        label = "received_from"
+        result.data.direction = "credit"
+    elif not has_paid_to:
+        return
+
+    for _, value in _candidates_after(lines, label):
+        if not re.search(r"[A-Za-z]{2,}", value):
+            continue  # needs letters
+        if _looks_like_date_or_time(value) or _parse_amount_only(value) is not None:
             continue
-        candidate = compact[0].upper() + _fix_digits(compact[1:])
-        # OCR sometimes reads the leading "T" as "7" or "1".
-        if candidate[0] in "71" and candidate.isdigit() and 21 <= len(candidate) <= 24:
-            candidate = "T" + candidate[1:]
-            result.warnings.append("Transaction ID started with a digit; corrected the leading 'T'.")
-        if PHONEPE_TXN_ID_RE.fullmatch(candidate):
-            result.data.phonepe_transaction_id = candidate
-            return {index}
+        name, handle = _split_upi_handle(value)
+        if handle and not result.data.upi_id:
+            result.data.upi_id = handle
+        if not name:  # the line was only a UPI handle; a real name may follow
+            continue
+        result.data.merchant_name = _clean_merchant(name, result)
+        break
 
-    # No label: look for a T + many digits token anywhere.
-    for i, line in enumerate(lines):
-        match = PHONEPE_TXN_ID_RE.search(re.sub(r"\s+", "", line))
-        if match:
-            result.data.phonepe_transaction_id = match.group(0)
-            return {i}
-    return set()
+    if not result.data.merchant_name and result.data.upi_id:
+        result.data.merchant_name = result.data.upi_id  # person-to-person payment: the handle is all we have
 
 
-def _looks_like_reference(value: str) -> bool:
-    """UPI UTRs are 12 digits; allow 10-22 digits, or bank-style alphanumeric refs
-    that are mostly digits. Masked account numbers (XXXX1234) and PhonePe
-    transaction IDs (T + digits) are rejected."""
-    if re.fullmatch(r"\d{10,22}", value):
+def _split_upi_handle(value: str) -> tuple[str, str | None]:
+    """'BigBasket bigbasket@payuaxis' -> ('BigBasket', 'bigbasket@payuaxis')."""
+    # Drop a trailing amount OCR may have glued onto the line ("BigBasket ¥183").
+    value = MARKED_AMOUNT_RE.sub("", value).strip()
+    tokens = value.split()
+    handle = None
+    while tokens and UPI_HANDLE_RE.match(tokens[-1]) and (len(tokens) > 1 or "@" in tokens[-1]):
+        handle = tokens.pop()
+    return " ".join(tokens), handle
+
+
+def _clean_merchant(value: str, result: ParseResult) -> str:
+    truncated = bool(re.search(r"(\.{2,}|…)\s*$", value))
+    name = re.sub(r"(\.{2,}|…)\s*$", "", value)
+    name = re.sub(r"\s+", " ", name).strip(" -:,.'\"")
+    if truncated:
+        result.warnings.append("Merchant name looks truncated on the receipt.")
+    return name[:255]
+
+
+# ---------------------------------------------------------------------------
+# Amount
+# ---------------------------------------------------------------------------
+def _mask_lines(lines: list[str], data: ParsedTransaction) -> list[str]:
+    """Blank out identifiers, dates and times so only amount-like numbers remain."""
+    known = [x for x in (data.phonepe_transaction_id, data.utr, data.upi_reference) if x]
+    masked = []
+    for line in lines:
+        m = line
+        for identifier in known:
+            m = re.sub(_spaced_pattern(identifier), " ", m, flags=re.I)
+        m = re.sub(r"\bT\s*\d[\d\s]{14,}", " ", m)  # any other PhonePe-style ID
+        m = MASKED_ACCOUNT_RE.sub(" ", m)  # XXXXXX096929
+        m = re.sub(r"\d{10,}", " ", m)  # UTRs, phone numbers, other long references
+        for pattern in (DATE_DMY_NAME_RE, DATE_MDY_NAME_RE, DATE_NUMERIC_RE, TIME_12H_RE, TIME_24H_RE):
+            m = pattern.sub(" ", m)
+        masked.append(re.sub(r"\s+", " ", m).strip())
+    return masked
+
+
+def _pick(candidates: set[Decimal], result: ParseResult, warning: str | None = None) -> bool:
+    """Accept a single distinct candidate; record ambiguity if there are several."""
+    if len(candidates) == 1:
+        result.data.amount = candidates.pop().quantize(Decimal("0.01"))
+        if warning:
+            result.warnings.append(warning)
         return True
-    if re.search(r"X{3,}", value) or PHONEPE_TXN_ID_RE.fullmatch(value):
-        return False
-    return bool(re.fullmatch(r"[A-Z0-9]{12,22}", value)) and sum(c.isdigit() for c in value) >= 8
+    if len(candidates) > 1:
+        result.amount_candidates = sorted(candidates)
+        return True  # stop searching: don't guess between them
+    return False
 
 
-def _extract_reference(lines: list[str], label: str) -> tuple[str | None, set[int]]:
-    for index, value in _candidates_after(lines, label):
-        compact = re.sub(r"[\s\-]", "", value).upper()
-        if not re.search(r"X{3,}", compact):
-            compact = _fix_digits(compact)
-        if _looks_like_reference(compact):
-            return compact, {index}
-    return None, set()
+def _extract_amount(lines: list[str], result: ParseResult) -> None:
+    masked = _mask_lines(lines, result.data)
 
+    # a) Value right after an "Amount" label.
+    for _, value in _candidates_after(masked, "amount"):
+        amount = _parse_amount_only(value)
+        if amount is not None and amount > 0:
+            result.data.amount = amount.quantize(Decimal("0.01"))
+            return
 
-def _extract_account(lines: list[str], result: ParseResult) -> set[int]:
-    candidates = _candidates_after(lines, "debited_from")
-    for index, value in candidates:
-        match = MASKED_ACCOUNT_RE.search(value)
-        if match:
-            digits = _fix_digits(match.group(1))
-            if digits.isdigit() and len(digits) >= 4:
-                result.data.account_last4 = digits[-4:]
-                # A bank name, if shown, sits right next to the account number.
-                result.data.bank = _detect_bank([v for i, v in candidates if i <= index + 1])
-                return {index}
+    # b) Numbers with an explicit currency marker (₹ and its OCR look-alikes).
+    marked = set()
+    for line in masked:
+        for match in MARKED_AMOUNT_RE.finditer(line):
+            value = _to_decimal(match.group(1))
+            if value:
+                marked.add(value)
+    if _pick(marked, result, "Amount was found without an 'Amount' label."):
+        return
 
-    for i, line in enumerate(lines):  # no label: any masked number / "A/c XXXX1234"
-        match = MASKED_ACCOUNT_RE.search(line) or ACCOUNT_FALLBACK_RE.search(line)
-        if match:
-            digits = _fix_digits(match.group(1))
-            if digits.isdigit() and len(digits) >= 4:
-                result.data.account_last4 = digits[-4:]
-                return {i}
-
-    result.data.bank = _detect_bank([v for _, v in candidates[:2]])
-    result.warnings.append("Account number could not be found.")
-    return set()
-
-
-def _detect_bank(values: list[str]) -> str | None:
-    text = " " + " ".join(values).lower() + " "
-    for bank, keywords in KNOWN_BANKS.items():
-        for keyword in keywords:
-            if re.search(r"\b" + re.escape(keyword) + r"\b", text):
-                return bank
-    return None
+    # c) Lines that contain only a number, maybe with a misread ₹ in front.
+    bare = set()
+    for line in masked:
+        if _label_of(line):
+            continue
+        value = _parse_amount_only(line)
+        if value and not (2000 <= value <= 2100 and value == value.to_integral()):  # skip lone years
+            bare.add(value)
+    _pick(bare, result, "The currency symbol was unreadable; amount taken from a number-only line.")
 
 
 def _extract_message(lines: list[str], result: ParseResult) -> None:
@@ -431,39 +459,25 @@ def _extract_message(lines: list[str], result: ParseResult) -> None:
 # Public API
 # ---------------------------------------------------------------------------
 def parse_phonepe_receipt(ocr_text: str, today: date | None = None) -> ParseResult:
-    """Turn raw OCR text from a PhonePe receipt into a ParseResult."""
+    """Turn raw OCR text from a PhonePe receipt into a validated ParseResult."""
     today = today or date.today()
     result = ParseResult(data=ParsedTransaction(payment_method="UPI"))
     lines = _clean_lines(ocr_text or "")
     if not lines:
-        result.issues.append("The receipt text is empty.")
-        return result
+        result.empty_text = True
+        return validate_result(result, today)
 
-    # Extract identifiers first and remember their lines, so the amount search
-    # never mistakes an ID, UTR, account number or date for the amount.
-    skip: set[int] = set()
-    skip |= _extract_transaction_id(lines, result)
-
-    utr, utr_lines = _extract_reference(lines, "utr")
-    upi_ref, upi_lines = _extract_reference(lines, "upi_ref")
-    result.data.utr = utr or upi_ref
+    _extract_transaction_id(lines, result)
+    upi_ref = _extract_reference(lines, "upi_ref")
+    result.data.utr = _extract_reference(lines, "utr") or upi_ref
     result.data.upi_reference = upi_ref
-    skip |= utr_lines | upi_lines
-
-    skip |= _extract_account(lines, result)
-    skip |= _extract_date_time(lines, result, today)
-
+    _extract_account(lines, result)
+    _extract_date_time(lines, result)
     _extract_merchant(lines, result)
-    _extract_amount(lines, skip, result)
+    _extract_amount(lines, result)  # last: needs the identifiers to mask them
     _extract_message(lines, result)
 
-    if result.data.direction == "credit":
-        result.issues.append("This receipt is for money received, not an expense.")
-    if not result.data.merchant_name:
-        result.issues.append("Merchant could not be found.")
-    if not result.data.phonepe_transaction_id and not result.data.utr:
-        result.issues.append("No PhonePe transaction ID or UTR found, so duplicates can't be detected reliably.")
-    return result
+    return validate_result(result, today)
 
 
 def useful_message(message: str | None) -> str | None:

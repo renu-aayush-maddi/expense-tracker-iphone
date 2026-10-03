@@ -3,6 +3,7 @@
 POST /api/transactions/import/phonepe          <- called by the iPhone Shortcut
 GET  /api/imports/pending                      <- imports waiting for review
 GET  /api/imports/pending/{id}
+POST /api/imports/pending/reprocess            <- re-run all pending through the latest parser
 POST /api/imports/pending/{id}/confirm         <- save the reviewed transaction
 DELETE /api/imports/pending/{id}               <- discard
 """
@@ -34,6 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["imports"])
 
 import_limiter = RateLimiter(max_requests=settings.IMPORT_RATE_LIMIT_PER_MINUTE)
+reprocess_limiter = RateLimiter(max_requests=5)
 
 STATUS_CODES = {
     "created": status.HTTP_201_CREATED,
@@ -85,6 +87,16 @@ def list_pending(current_user: User = Depends(get_current_user), db: Session = D
     return db.scalars(
         select(PendingImport).where(PendingImport.user_id == current_user.id).order_by(PendingImport.created_at.desc())
     ).all()
+
+
+@router.post("/imports/pending/reprocess")
+def reprocess_pending(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-run every pending import through the latest parser (+ LLM fallback).
+    Returns how many were saved, were duplicates, or still need review."""
+    reprocess_limiter.hit(f"reprocess:{current_user.id}")
+    counts = transaction_importer.reprocess_pending(db, current_user.id, today_local())
+    logger.info("Reprocessed pending imports for user %s: %s", current_user.id, counts)
+    return counts
 
 
 @router.get("/imports/pending/{pending_id}", response_model=PendingImportDetailOut)

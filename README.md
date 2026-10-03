@@ -76,7 +76,7 @@ expense-tracker/
 │   │   ├── services/       # business logic: parsers, importer, categorizer, duplicates, stats
 │   │   └── main.py         # FastAPI app, CORS, error handlers, security headers
 │   ├── alembic/            # database migrations
-│   ├── tests/              # pytest suite (113 tests)
+│   ├── tests/              # pytest suite (148 tests)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -117,6 +117,7 @@ JWTs expire after 7 days, and a Shortcut can't log in. So in **Settings** you cr
 | Frontend | React 19, Vite, React Router, Recharts, plain CSS (no Tailwind) |
 | Backend | Python, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, psycopg 3 |
 | Auth | bcrypt password hashing, JWT (PyJWT), hashed personal import tokens |
+| AI fallback (optional) | OpenAI Responses API with structured outputs (`openai` SDK) |
 | Database | PostgreSQL (Supabase in production; any Postgres works, since only `DATABASE_URL` changes) |
 | Hosting | Render Static Site (frontend), Render Web Service (backend) |
 | Tests | pytest + FastAPI TestClient (SQLite by default, or PostgreSQL) |
@@ -191,6 +192,10 @@ You never create tables by hand. `alembic upgrade head` creates them.
 | `MAX_REQUEST_BYTES` | | `65536` | Request size limit |
 | `IMPORT_RATE_LIMIT_PER_MINUTE` | | `30` | Per user |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | | `10` | Per IP |
+| `OPENAI_API_KEY` | optional | `sk-…` | Turns on the AI fallback for hard-to-read receipts. Leave empty to disable. |
+| `OPENAI_MODEL` | | `gpt-5.4-mini` | Any OpenAI model that supports structured outputs |
+| `LLM_FALLBACK_ENABLED` | | `true` | Switch the fallback off without removing the key |
+| `LLM_TIMEOUT_SECONDS` | | `20` | After this, the import goes to review instead |
 
 ### Frontend (`frontend/.env` locally, Render static site env in production)
 
@@ -285,7 +290,7 @@ Against real PostgreSQL (recommended before deploying):
 TEST_DATABASE_URL=postgresql://YOUR_USER@localhost:5432/expense_tracker_test pytest
 ```
 
-What's covered (113 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; review-required flow, confirm and discard; import tokens; request size limits; dashboard maths.
+What's covered (148 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; import tokens; request size limits; dashboard maths.
 
 ---
 
@@ -387,6 +392,8 @@ Environment variables for the backend:
 | `CORS_ORIGINS` | `https://YOUR-FRONTEND.onrender.com` |
 | `ALLOW_REGISTRATION` | `true` (change to `false` after registering) |
 | `APP_TIMEZONE` | `Asia/Kolkata` |
+| `OPENAI_API_KEY` | optional: your OpenAI key (enables the AI fallback, see section 14) |
+| `OPENAI_MODEL` | `gpt-5.4-mini` |
 
 **Frontend: New + → Static Site** → same repo:
 
@@ -483,14 +490,26 @@ What happens when you share a receipt:
    - OCR fixes: `O`→`0` and `I/l`→`1` inside IDs, a leading `7`→`T` on transaction IDs, `0ct`→`Oct`, `2O26`→`2026`.
 4. **Enrich**: bank from your Settings → Bank accounts mapping; category from your past choice for that merchant, otherwise from rules (`services/categorizer.py`).
 5. **Duplicate check (strong)**: same PhonePe transaction ID or UTR/UPI ref → `duplicate`.
-6. **Validate**: anything uncertain (no amount, conflicting amounts, no merchant, no date, future date, money *received*, no ID and no UTR) → stored in `pending_imports` → `review_required`. **Nothing uncertain is saved as a transaction.**
-7. **Duplicate check (fallback)**: same date + amount + merchant (+ account last 4 and time) → `duplicate`.
-8. **Save**, with database unique constraints as the final guard against two identical requests at the same instant.
-9. The raw OCR text is stored with the transaction for debugging (visible only to you, under "Debug details" on the transaction page). **It is never written to logs.**
+6. **AI fallback** (`services/llm_extractor.py`, only if `OPENAI_API_KEY` is set and the parser is missing the amount, merchant or date):
+   - OpenAI gets a **redacted** copy: transaction IDs, UTRs and account numbers are replaced with placeholders, and the request is sent with `store=false`. IDs always come from the rule-based parser.
+   - Its answer is **verified**: the amount must literally appear as a number in the receipt (and not be part of a date or time); if the parser saw several amounts, it must be one of them. The merchant's words must appear in the text.
+   - The merged result is validated again. If anything is still uncertain, it goes to review. On timeout or API errors it also goes to review.
+   - These transactions are marked **"Read by: AI-assisted"** on the detail page.
+   - Cost: one short request (~1–4 s, a fraction of a cent) and **only** for receipts the parser couldn't read. Re-shared duplicates never call it.
+7. **Validate**: anything uncertain (no amount, conflicting amounts, no merchant, no date, future date, money *received*, no ID and no UTR) → stored in `pending_imports` → `review_required`. **Nothing uncertain is saved as a transaction.**
+8. **Duplicate check (fallback)**: same date + amount + merchant (+ account last 4 and time) → `duplicate`.
+9. **Save**, with database unique constraints as the final guard against two identical requests at the same instant.
+10. The raw OCR text is stored with the transaction for debugging (visible only to you, under "Debug details" on the transaction page). **It is never written to logs.**
 
 ### Reviewing
 
 When an import needs review, the dashboard shows a yellow banner and **Import** lists it. Open it to see why it needs review (problem fields are highlighted), fix the values, and click **Save transaction**. If a very similar transaction already exists, you can view it or choose "save anyway". **Discard** throws the import away.
+
+After a parser improvement, or after adding `OPENAI_API_KEY`, click **Retry all** on the Import page. Every pending import is run through the latest pipeline, and the ones that now read cleanly are saved automatically.
+
+Sharing the same receipt again (even if the OCR text comes out slightly different) updates the same review instead of creating a second one, because reviews are matched by transaction ID/UTR as well as by text.
+
+**Known limit:** if OCR turns ₹ into the digit `2` (₹183 → `2183`), the text really says 2183 and neither the parser nor the AI can know otherwise. Check amounts that look too large and edit them.
 
 ---
 
@@ -554,6 +573,9 @@ Run the same command again → HTTP 200, `"status": "duplicate"`.
 | **Shortcut shows nothing, or an error, the first time in a while** | The free Render server was asleep (it sleeps after 15 min idle; waking takes 30–60 s, and the Shortcut may time out). Run it again. To avoid this, use a free uptime pinger (e.g. cron-job.org or UptimeRobot) to request `/api/health` every 10–14 minutes, or upgrade the Render instance. |
 | Shortcut notification: "Invalid import token" | The token was deleted or mistyped. Create a new one in Settings; the header value must be `Bearer etk_…` with a space after Bearer. |
 | Shortcut: "Get Dictionary Value" fails | The server didn't return JSON (usually it was still waking up, or the URL is wrong). Check the URL ends in `/api/transactions/import/phonepe`. |
+| Receipts go to review with "Amount could not be found" | Set `OPENAI_API_KEY` on Render (the AI fallback reads unusual ₹ misreads), then click **Retry all** on the Import page. If one still fails, open it, expand **Raw OCR text**, and add that text as a test case in `tests/test_llm_fallback.py`. |
+| Imports marked AI-assisted are wrong | Edit them, and consider a different `OPENAI_MODEL`. Remove `OPENAI_API_KEY` (or set `LLM_FALLBACK_ENABLED=false`) to always use manual review instead. |
+| Log shows `LLM fallback failed: AuthenticationError` / `RateLimitError` | The OpenAI key is wrong or revoked, or the account has no credit. Imports keep working; they go to review. |
 | Every receipt goes to review | Open the review and expand **Raw OCR text** to see what the iPhone extracted. If PhonePe changed its layout, update the label patterns in `phonepe_parser.py`, add the text as a test in `tests/test_phonepe_parser.py`, and redeploy. |
 | Frontend: "Can't reach the server" | `VITE_API_URL` is wrong or the backend is asleep. Changing `VITE_API_URL` requires redeploying the static site. |
 | Browser console: CORS error | `CORS_ORIGINS` on the backend must exactly match the frontend URL (`https://…onrender.com`, no trailing slash). |
@@ -587,6 +609,7 @@ All endpoints are under `/api`. Everything except `health`, `meta`, `register` a
 | DELETE | `/transactions/{id}` | Delete → 204 |
 | POST | `/transactions/import/phonepe` | `{ocr_text}` → `created` 201 / `duplicate` 200 / `review_required` 202 / `invalid` 422 |
 | GET | `/imports/pending` | Imports waiting for review |
+| POST | `/imports/pending/reprocess` | Re-run all pending imports through the latest parser + AI fallback → `{created, duplicate, review_required, invalid}` |
 | GET | `/imports/pending/{id}` | One pending import (with raw text) |
 | POST | `/imports/pending/{id}/confirm` | Save the reviewed transaction (`?allow_similar=true` to bypass the fallback duplicate check) |
 | DELETE | `/imports/pending/{id}` | Discard |
@@ -606,6 +629,7 @@ The import pipeline doesn't depend on PhonePe:
 services/
   parsing.py              # ParsedTransaction + ParseResult: the common format
   phonepe_parser.py       # PhonePe receipt OCR → ParseResult
+  llm_extractor.py        # optional AI fallback (redacted input, verified output)
   transaction_importer.py # generic pipeline + PARSERS registry
   categorizer.py          # merchant → category rules
   duplicate_detector.py   # ID/UTR + fallback duplicate checks

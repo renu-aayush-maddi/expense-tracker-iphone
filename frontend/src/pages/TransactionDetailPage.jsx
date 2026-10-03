@@ -8,6 +8,12 @@ import { useApi } from "../hooks/useApi";
 import { transactionService } from "../services/transactionService";
 import { formatCurrency, formatDate, formatDateTime, formatTime } from "../utils/format";
 
+const EXTRACTION_LABELS = {
+  rules: "Automatic parser",
+  ai: "AI-assisted (receipt was hard to read)",
+  reviewed: "You (reviewed import)",
+};
+
 function Detail({ label, value, mono = false }) {
   return (
     <div className="detail">
@@ -107,6 +113,7 @@ export default function TransactionDetailPage() {
               <Detail label="UTR" value={t.utr} mono />
               {t.upi_reference && t.upi_reference !== t.utr && <Detail label="UPI reference" value={t.upi_reference} mono />}
               <Detail label="Source" value={<SourceBadge source={t.source} />} />
+              {t.extraction_method && <Detail label="Read by" value={EXTRACTION_LABELS[t.extraction_method]} />}
               <Detail label="Created" value={formatDateTime(t.created_at)} />
               {t.updated_at !== t.created_at && <Detail label="Last updated" value={formatDateTime(t.updated_at)} />}
             </dl>
