@@ -1,8 +1,8 @@
-"""Transaction CRUD, filtering and pagination. Routes stay thin and call these."""
+from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date as dt_date
 from decimal import Decimal
 
 from sqlalchemy import extract, func, or_, select
@@ -22,9 +22,9 @@ class DuplicateTransactionError(Exception):
 
 @dataclass
 class TransactionFilters:
-    date: date | None = None
-    date_from: date | None = None
-    date_to: date | None = None
+    date: dt_date | None = None
+    date_from: dt_date | None = None
+    date_to: dt_date | None = None
     month: int | None = None
     year: int | None = None
     category: str | None = None
