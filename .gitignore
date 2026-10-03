@@ -1,0 +1,25 @@
+# Secrets
+.env
+.env.*
+!.env.example
+key.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+*.log
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
