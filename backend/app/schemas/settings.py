@@ -51,3 +51,34 @@ class BankAccountOut(BaseModel):
     account_last4: str
     bank_name: str
     created_at: datetime
+
+
+class ReimbursementRule(BaseModel):
+    enabled: bool = True
+    # Words to look for in the merchant name (whole words, any capitalisation).
+    keywords: list[str] = Field(min_length=1, max_length=30)
+    # 0 = Monday … 6 = Sunday
+    weekdays: list[int] = Field(max_length=7)
+
+    @field_validator("keywords")
+    @classmethod
+    def clean_keywords(cls, values: list[str]) -> list[str]:
+        cleaned = []
+        for value in values:
+            word = " ".join(value.split()).lower()
+            if not word:
+                continue
+            if len(word) < 2 or len(word) > 50:
+                raise ValueError("Each keyword must be 2–50 characters")
+            if word not in cleaned:
+                cleaned.append(word)
+        if not cleaned:
+            raise ValueError("Add at least one keyword")
+        return cleaned
+
+    @field_validator("weekdays")
+    @classmethod
+    def check_weekdays(cls, values: list[int]) -> list[int]:
+        if any(day < 0 or day > 6 for day in values):
+            raise ValueError("Weekdays must be between 0 (Monday) and 6 (Sunday)")
+        return sorted(set(values))

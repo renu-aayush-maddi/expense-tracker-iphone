@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import Alert from "../components/Alert";
 import Loading from "../components/Loading";
+import ReimbursableToggle from "../components/ReimbursableToggle";
 import SourceBadge from "../components/SourceBadge";
 import TransactionForm from "../components/TransactionForm";
 import { useApi } from "../hooks/useApi";
@@ -36,6 +37,15 @@ export default function TransactionDetailPage() {
     setData(updated);
     setEditing(false);
     setMessage("Transaction updated.");
+  };
+
+  const setReimbursable = async (value) => {
+    setActionError("");
+    try {
+      setData(await transactionService.setReimbursable(id, value));
+    } catch (err) {
+      setActionError(err.message);
+    }
   };
 
   const handleDelete = async () => {
@@ -113,6 +123,26 @@ export default function TransactionDetailPage() {
               <Detail label="UTR" value={t.utr} mono />
               {t.upi_reference && t.upi_reference !== t.utr && <Detail label="UPI reference" value={t.upi_reference} mono />}
               <Detail label="Source" value={<SourceBadge source={t.source} />} />
+              <Detail
+                label="Company reimbursable"
+                value={
+                  <span className="reimb-detail">
+                    <ReimbursableToggle transaction={t} onToggle={() => setReimbursable(!t.is_reimbursable)} />
+                    <span className="muted small">
+                      {t.reimbursable_set_by === "user" ? (
+                        <>
+                          Set by you ·{" "}
+                          <button type="button" className="link-button" onClick={() => setReimbursable(null)}>
+                            use automatic
+                          </button>
+                        </>
+                      ) : (
+                        "Automatic (reimbursement rule)"
+                      )}
+                    </span>
+                  </span>
+                }
+              />
               {t.extraction_method && <Detail label="Read by" value={EXTRACTION_LABELS[t.extraction_method]} />}
               <Detail label="Created" value={formatDateTime(t.created_at)} />
               {t.updated_at !== t.created_at && <Detail label="Last updated" value={formatDateTime(t.updated_at)} />}

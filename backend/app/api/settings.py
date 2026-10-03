@@ -1,4 +1,5 @@
-"""User settings: import tokens for the iPhone Shortcut, and account -> bank mappings."""
+"""User settings: import tokens for the iPhone Shortcut, account -> bank mappings,
+and the company reimbursement rule."""
 
 import uuid
 
@@ -11,7 +12,15 @@ from app.api.deps import get_current_user
 from app.core.security import generate_import_token, hash_import_token
 from app.db.session import get_db
 from app.models import ApiToken, BankAccount, User
-from app.schemas.settings import ApiTokenCreate, ApiTokenCreated, ApiTokenOut, BankAccountCreate, BankAccountOut
+from app.schemas.settings import (
+    ApiTokenCreate,
+    ApiTokenCreated,
+    ApiTokenOut,
+    BankAccountCreate,
+    BankAccountOut,
+    ReimbursementRule,
+)
+from app.services import reimbursement
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -86,3 +95,23 @@ def delete_account(account_id: uuid.UUID, current_user: User = Depends(get_curre
     db.delete(account)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ----- Company reimbursement rule -----
+@router.get("/reimbursement", response_model=ReimbursementRule)
+def get_reimbursement_rule(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return reimbursement.get_rule(db, current_user.id).__dict__
+
+
+@router.put("/reimbursement", response_model=ReimbursementRule)
+def update_reimbursement_rule(
+    payload: ReimbursementRule, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)
+):
+    rule = reimbursement.Rule(enabled=payload.enabled, keywords=payload.keywords, weekdays=payload.weekdays)
+    return reimbursement.save_rule(db, current_user.id, rule).__dict__
+
+
+@router.post("/reimbursement/apply")
+def apply_reimbursement_rule(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-evaluate existing transactions with the current rule. Manual choices are kept."""
+    return {"updated": reimbursement.reapply_rule(db, current_user.id)}

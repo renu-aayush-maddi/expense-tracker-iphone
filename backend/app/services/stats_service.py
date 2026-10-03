@@ -5,7 +5,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import extract, func, select
+from sqlalchemy import case, extract, func, select
 from sqlalchemy.orm import Session
 
 from app.models import PendingImport, Transaction
@@ -51,6 +51,12 @@ def get_dashboard(db: Session, user_id: uuid.UUID, year: int, month: int, today:
     month_total = _money(month_total)
     month_average = _money(month_total / month_count) if month_count else ZERO
 
+    # Company reimbursements this month.
+    reimb_total, reimb_count = db.execute(
+        select(func.sum(Transaction.amount), func.count()).where(mine, in_month, Transaction.is_reimbursable.is_(True))
+    ).one()
+    reimb_total = _money(reimb_total)
+
     largest = db.scalars(
         select(Transaction).where(mine, in_month).order_by(Transaction.amount.desc()).limit(1)
     ).first()
@@ -70,17 +76,26 @@ def get_dashboard(db: Session, user_id: uuid.UUID, year: int, month: int, today:
     trend_start = date(first_year, first_month, 1)
     year_col = extract("year", Transaction.transaction_date)
     month_col = extract("month", Transaction.transaction_date)
+    reimbursable_amount = func.sum(case((Transaction.is_reimbursable.is_(True), Transaction.amount), else_=0))
     trend_rows = db.execute(
-        select(year_col, month_col, func.sum(Transaction.amount))
+        select(year_col, month_col, func.sum(Transaction.amount), reimbursable_amount)
         .where(mine, Transaction.transaction_date.between(trend_start, month_end))
         .group_by(year_col, month_col)
     ).all()
-    trend_map = {(int(y), int(m)): total for y, m, total in trend_rows}
+    trend_map = {(int(y), int(m)): (total, reimb) for y, m, total, reimb in trend_rows}
     monthly_trend = []
     for offset in range(12):
         y, m = _shift_month(first_year, first_month, offset)
+        total, reimb = trend_map.get((y, m), (0, 0))
         monthly_trend.append(
-            {"year": y, "month": m, "label": f"{calendar.month_abbr[m]} {y}", "total": _money(trend_map.get((y, m)))}
+            {
+                "year": y,
+                "month": m,
+                "label": f"{calendar.month_abbr[m]} {y}",
+                "total": _money(total),
+                "reimbursable": _money(reimb),
+                "personal": _money(total) - _money(reimb),
+            }
         )
 
     yearly_rows = db.execute(
@@ -108,6 +123,9 @@ def get_dashboard(db: Session, user_id: uuid.UUID, year: int, month: int, today:
         "month_total": month_total,
         "month_count": month_count,
         "month_average": month_average,
+        "month_reimbursable_total": reimb_total,
+        "month_reimbursable_count": reimb_count,
+        "month_personal_total": month_total - reimb_total,
         "largest_transaction": largest,
         "by_category": _group_totals(db, user_id, Transaction.category, month_start, month_end, "Other"),
         "by_bank": _group_totals(db, user_id, Transaction.bank, month_start, month_end, "Unknown"),

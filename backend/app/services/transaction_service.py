@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.constants import CATEGORIES, PAYMENT_METHODS, SOURCE_MANUAL, SOURCES
 from app.models import Transaction
-from app.services import duplicate_detector
+from app.services import duplicate_detector, reimbursement
 
 
 class DuplicateTransactionError(Exception):
@@ -35,6 +35,7 @@ class TransactionFilters:
     min_amount: Decimal | None = None
     max_amount: Decimal | None = None
     source: str | None = None
+    reimbursable: bool | None = None
 
 
 SORT_FIELDS = {
@@ -66,6 +67,8 @@ def _apply_filters(query, filters: TransactionFilters):
         query = query.where(func.lower(Transaction.payment_method) == f.payment_method.lower())
     if f.source:
         query = query.where(Transaction.source == f.source)
+    if f.reimbursable is not None:
+        query = query.where(Transaction.is_reimbursable.is_(f.reimbursable))
     if f.merchant:
         query = query.where(Transaction.merchant_name.ilike(f"%{f.merchant}%"))
     if f.min_amount is not None:
@@ -108,6 +111,12 @@ def list_transactions(
     return list(items), total
 
 
+def list_all_for_export(db: Session, user_id: uuid.UUID, filters: TransactionFilters, limit: int = 5000) -> list[Transaction]:
+    query = _apply_filters(select(Transaction).where(Transaction.user_id == user_id), filters)
+    query = query.order_by(Transaction.transaction_date, Transaction.transaction_time.nulls_last(), Transaction.created_at)
+    return list(db.scalars(query.limit(limit)).all())
+
+
 def get_transaction(db: Session, user_id: uuid.UUID, transaction_id: uuid.UUID) -> Transaction | None:
     return db.scalar(
         select(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user_id)
@@ -142,6 +151,7 @@ def create_transaction(
     if existing:
         raise DuplicateTransactionError(existing)
 
+    data = reimbursement.apply_to_new(db, user_id, data)  # company-reimbursable? (rule or user's choice)
     transaction = Transaction(user_id=user_id, source=source, raw_ocr_text=raw_ocr_text, **data)
     db.add(transaction)
     return _save(db, transaction)
@@ -159,6 +169,7 @@ def update_transaction(db: Session, transaction: Transaction, changes: dict) -> 
     if existing:
         raise DuplicateTransactionError(existing)
 
+    changes = reimbursement.apply_to_update(db, transaction, changes)
     for field, value in changes.items():
         setattr(transaction, field, value)
     return _save(db, transaction)

@@ -51,6 +51,34 @@ function buildUrl(path, params) {
   return url.toString();
 }
 
+/** Download a file (e.g. CSV) from an authenticated endpoint. */
+export async function apiDownload(path, params, filename) {
+  const token = tokenStore.get();
+  let response;
+  try {
+    response = await fetch(buildUrl(path, params), { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  } catch {
+    throw new ApiError("Can't reach the server. Please try again.", 0, null);
+  }
+  if (!response.ok) {
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    throw new ApiError(friendlyMessage(response.status, data), response.status, data);
+  }
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export async function apiRequest(path, { method = "GET", body, params } = {}) {
   const headers = {};
   const token = tokenStore.get();

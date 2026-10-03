@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Alert from "../components/Alert";
 import Loading from "../components/Loading";
+import ReimbursementSettings from "../components/ReimbursementSettings";
 import { useApi } from "../hooks/useApi";
 import { useAuth } from "../hooks/useAuth";
 import { API_URL } from "../services/api";
@@ -225,6 +226,7 @@ export default function SettingsPage() {
         </button>
       </section>
 
+      <ReimbursementSettings />
       <ImportTokens />
       <BankAccounts />
 

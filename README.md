@@ -29,6 +29,8 @@ PhonePe → Share Receipt → iPhone Shortcut (OCR only) → FastAPI → Parser 
 17. [API reference](#17-api-reference)
 18. [Extending: new import sources](#18-extending-new-import-sources)
 
+Also: [Company reimbursements](#14b-company-reimbursements)
+
 ---
 
 ## 1. Project overview
@@ -41,6 +43,7 @@ What you can do:
 - **Import PhonePe payments automatically**: share the receipt to the "Phonepay Automation" Shortcut and the expense appears in the app
 - Review imports that couldn't be read confidently. Nothing uncertain is saved silently.
 - Duplicate protection: sharing the same receipt twice never creates two transactions
+- **Company reimbursements**: weekday rides (Uber / Ola / Rapido) are marked "Company" automatically; flip any transaction with one click, see what the company owes you on the dashboard, and download the month's claim as CSV
 
 **The key design decision:** the iPhone Shortcut only does OCR and one HTTP request. **All the intelligence lives in the backend**: parsing, amount and merchant extraction, IDs, date and time, account, category, validation, duplicate detection and storage. If PhonePe changes its receipt layout, you only update `backend/app/services/phonepe_parser.py`.
 
@@ -76,7 +79,7 @@ expense-tracker/
 │   │   ├── services/       # business logic: parsers, importer, categorizer, duplicates, stats
 │   │   └── main.py         # FastAPI app, CORS, error handlers, security headers
 │   ├── alembic/            # database migrations
-│   ├── tests/              # pytest suite (158 tests)
+│   ├── tests/              # pytest suite (179 tests)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -103,6 +106,7 @@ expense-tracker/
 | `pending_imports` | Imports that need review: the parsed guess, the list of issues and the raw OCR. Unique per receipt text, so re-sharing doesn't create two reviews. |
 | `api_tokens` | Personal import tokens for the Shortcut. Only a SHA-256 hash is stored. |
 | `bank_accounts` | Maps account last-4 digits to a bank name (e.g. 6929 → Kotak). |
+| `reimbursement_settings` | Your company-reimbursement rule (on/off, merchant words, weekdays). No row = the defaults. |
 
 ### Why the Shortcut uses an "import token" instead of a JWT
 
@@ -290,7 +294,7 @@ Against real PostgreSQL (recommended before deploying):
 TEST_DATABASE_URL=postgresql://YOUR_USER@localhost:5432/expense_tracker_test pytest
 ```
 
-What's covered (158 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, ₹ read as a leading `2`, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; import tokens; request size limits; dashboard maths.
+What's covered (179 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, ₹ read as a leading `2`, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; company-reimbursement rule (weekdays, whole-word matching, Ola/Rapido company names), manual overrides, re-applying the rule, filters and CSV export (incl. spreadsheet formula escaping); import tokens; request size limits; dashboard maths.
 
 ---
 
@@ -524,6 +528,22 @@ The last case (real amounts of ₹1,000–₹9,999) can't be decided from text, 
 
 ---
 
+## 14b. Company reimbursements
+
+Every transaction is either **Company** (your employer pays it back) or **Personal**.
+
+**Automatic rule (default):** merchant name contains *uber*, *ola*, *rapido*, *ani technologies* (Ola's company name) or *roppen* (Rapido's company name), **and** the date is Monday–Friday. Matching is by whole word ("Coca Cola" doesn't match "ola"). The rule runs for manual entries, PhonePe imports and reviewed imports.
+
+**Change it:** Settings → *Company reimbursement*: turn it off, edit the merchant words, or pick other days. **Save rule** affects new transactions; **Apply to existing transactions** re-checks old ones.
+
+**Override any transaction:** click its **Company / Personal** button (transactions list, dashboard's recent list, or the detail page), or use the checkbox in the add/edit form. Your choice is remembered as *set by you* and is **never** overwritten by the rule. On the detail page, "use automatic" hands it back to the rule.
+
+**See it:** the dashboard's *Company reimbursements* card shows what the company owes you this month, your own spending, a split bar, and a 12-month stacked chart (your own vs company). **View list** opens the month's reimbursable transactions; **Download CSV** gives a claim file with a total row, ready to attach to an expense report. The Transactions page has a *Reimbursable* filter and its own **Download CSV** for any filter.
+
+When you first deploy this version, the database migration flags your existing weekday rides using the default rule.
+
+---
+
 ## 15. End-to-end test
 
 ### Locally (without an iPhone)
@@ -612,8 +632,9 @@ All endpoints are under `/api`. Everything except `health`, `meta`, `register` a
 | POST | `/auth/register` | `{email, password, full_name?}` → `{access_token, user}` |
 | POST | `/auth/login` | `{email, password}` → `{access_token, user}` |
 | GET | `/auth/me` | Current user |
-| GET | `/transactions` | List. Filters: `date, date_from, date_to, month, year, category, bank, payment_method, merchant, search, min_amount, max_amount, source`; `sort_by` (date/amount/merchant/category/created), `sort_order`, `page`, `page_size` (max 100) |
+| GET | `/transactions` | List. Filters: `date, date_from, date_to, month, year, category, bank, payment_method, merchant, search, min_amount, max_amount, source, reimbursable`; `sort_by` (date/amount/merchant/category/created), `sort_order`, `page`, `page_size` (max 100) |
 | GET | `/transactions/filter-options` | Values for filter dropdowns |
+| GET | `/transactions/export.csv` | Same filters as the list (e.g. `?reimbursable=true&year=2026&month=10`) → CSV download with a total row |
 | GET | `/transactions/{id}` | One transaction (includes `raw_ocr_text`) |
 | POST | `/transactions` | Create (manual) |
 | PUT | `/transactions/{id}` | Update (send only the fields you change) |
@@ -627,6 +648,8 @@ All endpoints are under `/api`. Everything except `health`, `meta`, `register` a
 | GET | `/stats/dashboard?year=&month=` | All dashboard numbers |
 | GET/POST/DELETE | `/settings/tokens[/{id}]` | Manage import tokens |
 | GET/POST/DELETE | `/settings/accounts[/{id}]` | Manage account → bank mappings |
+| GET/PUT | `/settings/reimbursement` | Read / change the company-reimbursement rule `{enabled, keywords, weekdays}` (0 = Monday) |
+| POST | `/settings/reimbursement/apply` | Re-check existing transactions with the rule (manual choices kept) → `{updated}` |
 
 Error responses always look like `{"detail": "Human readable message"}` (422s also include `errors: [{field, message}]`). Status codes: 400, 401, 403, 404, 409 (duplicate), 413, 422, 429, 500. Stack traces are never sent to clients.
 

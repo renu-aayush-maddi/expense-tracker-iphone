@@ -83,6 +83,14 @@ export default function TransactionFilters({ filters, options, onChange }) {
           </select>
         </label>
         <label className="field">
+          <span>Reimbursable</span>
+          <select value={filters.reimbursable || ""} onChange={set("reimbursable")}>
+            <option value="">All</option>
+            <option value="true">Company</option>
+            <option value="false">Personal</option>
+          </select>
+        </label>
+        <label className="field">
           <span>Month</span>
           <input type="month" value={monthValue} onChange={setMonth} />
         </label>

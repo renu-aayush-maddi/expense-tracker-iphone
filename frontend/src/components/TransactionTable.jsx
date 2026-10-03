@@ -1,16 +1,31 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { formatCurrency, formatDate, formatTime } from "../utils/format";
+import ReimbursableToggle from "./ReimbursableToggle";
 import SourceBadge from "./SourceBadge";
 
-/** Transactions as a table on desktop; CSS turns each row into a card on mobile. */
-export default function TransactionTable({ transactions, compact = false }) {
+/**
+ * Transactions as a table on desktop; CSS turns each row into a card on mobile.
+ * `onToggleReimbursable(transaction)` (async) adds the one-click Company/Personal switch.
+ */
+export default function TransactionTable({ transactions, compact = false, onToggleReimbursable }) {
   const navigate = useNavigate();
+  const [busyId, setBusyId] = useState(null);
 
   if (!transactions?.length) {
     return <p className="empty">No transactions found.</p>;
   }
 
   const open = (id) => navigate(`/transactions/${id}`);
+
+  const toggle = async (transaction) => {
+    setBusyId(transaction.id);
+    try {
+      await onToggleReimbursable(transaction);
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   return (
     <div className="table-wrap">
@@ -23,6 +38,7 @@ export default function TransactionTable({ transactions, compact = false }) {
             {!compact && <th>Payment</th>}
             {!compact && <th>Bank</th>}
             {!compact && <th>Source</th>}
+            {onToggleReimbursable && <th>Reimbursable</th>}
             <th className="num">Amount</th>
           </tr>
         </thead>
@@ -58,6 +74,11 @@ export default function TransactionTable({ transactions, compact = false }) {
               {!compact && (
                 <td data-label="Source">
                   <SourceBadge source={t.source} />
+                </td>
+              )}
+              {onToggleReimbursable && (
+                <td data-label="Reimbursable">
+                  <ReimbursableToggle transaction={t} onToggle={toggle} busy={busyId === t.id} />
                 </td>
               )}
               <td data-label="Amount" className="num amount">

@@ -32,7 +32,13 @@ def test_dashboard(client, auth_headers):
     assert len(body["daily"]) == 31
     assert body["daily"][0]["total"] == "350.50"
     assert len(body["monthly_trend"]) == 12
-    assert body["monthly_trend"][-1] == {"year": 2026, "month": 10, "label": "Oct 2026", "total": "850.50"}
+    # Uber on Thursday 1 Oct is a weekday ride -> reimbursable by the default rule.
+    assert body["monthly_trend"][-1] == {
+        "year": 2026, "month": 10, "label": "Oct 2026", "total": "850.50", "reimbursable": "250.50", "personal": "600.00"
+    }
+    assert body["month_reimbursable_total"] == "250.50"
+    assert body["month_reimbursable_count"] == 1
+    assert body["month_personal_total"] == "600.00"
     assert body["monthly_trend"][-2]["total"] == "1000.00"
     assert body["yearly"] == [{"year": 2025, "total": "50.00"}, {"year": 2026, "total": "1850.50"}]
     assert len(body["recent_transactions"]) == 5

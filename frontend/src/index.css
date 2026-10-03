@@ -18,6 +18,9 @@
   --primary-hover: #256abf;
   --primary-text: #ffffff;
   --series-1: #2a78d6;
+  --series-2: #eb6834; /* validated pair with --series-1 (light surface) */
+  --company: #a8441b; /* text on --company-bg */
+  --company-bg: #fdece4;
   --danger: #c43b3a;
   --danger-bg: #fdecec;
   --success: #0f7a3d;
@@ -49,6 +52,9 @@
     --primary: #3987e5;
     --primary-hover: #5598e7;
     --series-1: #3987e5;
+    --series-2: #d95926; /* validated pair with --series-1 (dark surface) */
+    --company: #f6a986;
+    --company-bg: #3b2217;
     --danger: #f07b7a;
     --danger-bg: #3a1d1d;
     --success: #5fd391;
@@ -831,6 +837,163 @@ textarea {
   padding: 12px 20px;
   font-variant-numeric: tabular-nums;
 }
+/* ----- Company reimbursement ----- */
+.reimb-toggle {
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.reimb-toggle:hover:not(:disabled) {
+  border-style: solid;
+  color: var(--text);
+}
+.reimb-toggle.is-company {
+  border: 1px solid transparent;
+  background: var(--company-bg);
+  color: var(--company);
+}
+.reimb-toggle:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.reimb-toggle:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.reimb-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.reimb-field {
+  gap: 2px;
+}
+.reimb-field .checkbox {
+  margin-top: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+.reimb-header {
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.reimb-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 8px 0 12px;
+}
+.reimb-stat {
+  display: flex;
+  flex-direction: column;
+}
+.reimb-stat .stat-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.share-bar {
+  display: flex;
+  gap: 2px; /* surface gap between the two parts */
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.share-own {
+  background: var(--series-1);
+}
+.share-company {
+  background: var(--series-2);
+}
+.chart-title {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.legend-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.chart-legend {
+  list-style: none;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 0;
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.chart-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tooltip-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+.tooltip-total {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 4px;
+}
+.weekday-picker {
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+.weekday-picker:disabled {
+  opacity: 0.55;
+}
+.weekday-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.weekday {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.weekday input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.weekday.is-on {
+  background: var(--hover);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.weekday:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
 .steps {
   padding-left: 20px;
   margin: 8px 0;
@@ -1040,6 +1203,19 @@ textarea {
   .table-responsive td[data-label="Bank"],
   .table-responsive td[data-label="Source"] {
     display: none;
+  }
+  /* Category chip (left) and Company/Personal toggle (right) share the last line. */
+  .table-responsive td[data-label="Category"] {
+    grid-column: 1;
+  }
+  .table-responsive td[data-label="Reimbursable"] {
+    width: auto;
+    grid-column: 2;
+    justify-self: end;
+  }
+  .reimb-summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
   }
   .pending-item {
     flex-direction: column;

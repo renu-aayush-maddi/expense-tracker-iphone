@@ -30,7 +30,7 @@ CATEGORY_RULES: dict[str, list[str]] = {
         "zara", "uniqlo", "lenskart", "westside", "pantaloons",
     ],
     "Transport": [
-        "uber", "ola", "ola cabs", "rapido", "namma yatri", "blusmart", "metro", "fastag",
+        "uber", "ola", "ola cabs", "rapido", "ani technologies", "roppen", "namma yatri", "blusmart", "metro", "fastag",
         "petrol", "fuel", "indian oil", "iocl", "bharat petroleum", "bpcl", "hpcl",
         "hindustan petroleum", "shell", "parking", "auto",
     ],

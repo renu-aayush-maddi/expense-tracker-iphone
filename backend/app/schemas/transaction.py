@@ -40,6 +40,8 @@ class TransactionCreate(BaseModel):
     utr: OptionalStr = Field(default=None, max_length=64)
     account_last4: OptionalStr = None
     notes: OptionalStr = Field(default=None, max_length=2000)
+    # True/False = your choice; leave empty (null) to let the reimbursement rule decide.
+    is_reimbursable: bool | None = None
 
     @field_validator("merchant_name")
     @classmethod
@@ -75,6 +77,8 @@ class TransactionUpdate(BaseModel):
     utr: OptionalStr = Field(default=None, max_length=64)
     account_last4: OptionalStr = None
     notes: OptionalStr = Field(default=None, max_length=2000)
+    # True/False = your choice; null = back to automatic (rule decides).
+    is_reimbursable: bool | None = None
 
     @field_validator("merchant_name")
     @classmethod
@@ -110,6 +114,8 @@ class TransactionOut(BaseModel):
     utr: str | None
     account_last4: str | None
     source: str
+    is_reimbursable: bool
+    reimbursable_set_by: str | None
     extraction_method: str | None
     notes: str | None
     created_at: datetime

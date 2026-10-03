@@ -12,4 +12,7 @@ export const settingsService = {
       body: { account_last4: accountLast4, bank_name: bankName },
     }),
   deleteAccount: (id) => apiRequest(`/api/settings/accounts/${id}`, { method: "DELETE" }),
+  getReimbursementRule: () => apiRequest("/api/settings/reimbursement"),
+  saveReimbursementRule: (rule) => apiRequest("/api/settings/reimbursement", { method: "PUT", body: rule }),
+  applyReimbursementRule: () => apiRequest("/api/settings/reimbursement/apply", { method: "POST" }),
 };

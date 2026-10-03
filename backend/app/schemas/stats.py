@@ -16,6 +16,8 @@ class MonthTotal(BaseModel):
     month: int
     label: str  # e.g. "Oct 2026"
     total: Decimal
+    reimbursable: Decimal  # part the company pays back
+    personal: Decimal  # total - reimbursable
 
 
 class YearTotal(BaseModel):
@@ -35,6 +37,9 @@ class DashboardResponse(BaseModel):
     month_total: Decimal
     month_count: int
     month_average: Decimal
+    month_reimbursable_total: Decimal
+    month_reimbursable_count: int
+    month_personal_total: Decimal
     largest_transaction: TransactionOut | None
     by_category: list[GroupTotal]
     by_bank: list[GroupTotal]

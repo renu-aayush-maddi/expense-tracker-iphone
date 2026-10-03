@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import Alert from "../components/Alert";
 import Loading from "../components/Loading";
@@ -18,11 +18,33 @@ export default function TransactionsPage() {
   const filters = useMemo(() => Object.fromEntries(searchParams.entries()), [searchParams]);
   const page = Number(filters.page) || 1;
 
-  const { data, loading, error, reload } = useApi(
+  const { data, loading, error, reload, setData } = useApi(
     () => transactionService.list({ ...filters, page, page_size: PAGE_SIZE }),
     [searchParams.toString()],
   );
   const { data: options } = useApi(() => transactionService.filterOptions(), []);
+  const [actionError, setActionError] = useState("");
+
+  // One click: Company reimbursable <-> Personal. Updates the row in place.
+  const toggleReimbursable = async (transaction) => {
+    setActionError("");
+    try {
+      const updated = await transactionService.setReimbursable(transaction.id, !transaction.is_reimbursable);
+      setData((current) => ({ ...current, items: current.items.map((t) => (t.id === updated.id ? updated : t)) }));
+    } catch (err) {
+      setActionError(err.message);
+    }
+  };
+
+  const downloadCsv = async () => {
+    setActionError("");
+    try {
+      const { page: _page, sort_by: _sortBy, sort_order: _sortOrder, ...exportFilters } = filters;
+      await transactionService.exportCsv(exportFilters, "transactions.csv");
+    } catch (err) {
+      setActionError(err.message);
+    }
+  };
 
   const updateFilters = (next) => {
     const clean = Object.fromEntries(Object.entries(next).filter(([, value]) => value !== "" && value != null));
@@ -42,9 +64,14 @@ export default function TransactionsPage() {
           <h1>Transactions</h1>
           <p className="muted">Search, filter and open any transaction.</p>
         </div>
-        <Link to="/add-expense" className="btn btn-primary">
-          + Add expense
-        </Link>
+        <div className="page-actions">
+          <button type="button" className="btn btn-secondary" onClick={downloadCsv}>
+            Download CSV
+          </button>
+          <Link to="/add-expense" className="btn btn-primary">
+            + Add expense
+          </Link>
+        </div>
       </div>
 
       <TransactionFilters
@@ -52,6 +79,12 @@ export default function TransactionsPage() {
         options={options || { categories: meta.categories, banks: [], payment_methods: meta.payment_methods }}
         onChange={updateFilters}
       />
+
+      {actionError && (
+        <Alert type="error" onClose={() => setActionError("")}>
+          {actionError}
+        </Alert>
+      )}
 
       {error && (
         <Alert type="error">
@@ -68,7 +101,7 @@ export default function TransactionsPage() {
         ) : (
           data && (
             <div className={loading ? "is-refreshing" : ""}>
-              <TransactionTable transactions={data.items} />
+              <TransactionTable transactions={data.items} onToggleReimbursable={toggleReimbursable} />
               <Pagination page={data.page} pages={data.pages} total={data.total} onChange={goToPage} />
             </div>
           )

@@ -1,4 +1,4 @@
-import { apiRequest } from "./api";
+import { apiDownload, apiRequest } from "./api";
 
 export const transactionService = {
   list: (params) => apiRequest("/api/transactions", { params }),
@@ -7,6 +7,8 @@ export const transactionService = {
   update: (id, data) => apiRequest(`/api/transactions/${id}`, { method: "PUT", body: data }),
   remove: (id) => apiRequest(`/api/transactions/${id}`, { method: "DELETE" }),
   filterOptions: () => apiRequest("/api/transactions/filter-options"),
+  setReimbursable: (id, value) => apiRequest(`/api/transactions/${id}`, { method: "PUT", body: { is_reimbursable: value } }),
+  exportCsv: (params, filename = "transactions.csv") => apiDownload("/api/transactions/export.csv", params, filename),
 };
 
 export const statsService = {

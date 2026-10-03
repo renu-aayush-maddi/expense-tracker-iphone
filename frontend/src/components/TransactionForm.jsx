@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { useMeta } from "../hooks/useMeta";
+import { useReimbursementRule } from "../hooks/useReimbursementRule";
 import { transactionService } from "../services/transactionService";
 import { todayISO } from "../utils/format";
+import { ruleMatches } from "../utils/reimbursement";
 import Alert from "./Alert";
 
 const COMMON_BANKS = ["HDFC", "ICICI", "SBI", "Kotak", "Axis", "Yes Bank", "IDFC First", "IndusInd", "PNB", "Bank of Baroda"];
@@ -67,7 +69,14 @@ export default function TransactionForm({
   highlight = [],
 }) {
   const meta = useMeta();
+  const rule = useReimbursementRule();
   const [values, setValues] = useState(() => toFormValues(initialValues));
+  // null = automatic (the rule decides); true/false = your choice.
+  const [reimbursable, setReimbursable] = useState(() =>
+    initialValues?.reimbursable_set_by === "user" ? Boolean(initialValues.is_reimbursable) : null,
+  );
+  const automaticValue = ruleMatches(rule, values.merchant_name, values.transaction_date);
+  const isReimbursable = reimbursable ?? automaticValue;
   const [errors, setErrors] = useState({});
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -94,7 +103,7 @@ export default function TransactionForm({
 
     setSaving(true);
     try {
-      await onSubmit(toPayload(values));
+      await onSubmit({ ...toPayload(values), is_reimbursable: reimbursable });
     } catch (error) {
       // Map server-side validation errors onto fields where possible.
       const serverErrors = {};
@@ -201,6 +210,25 @@ export default function TransactionForm({
           />
           {error("account_last4")}
         </label>
+
+        <div className="field span-2 reimb-field">
+          <label className="checkbox">
+            <input type="checkbox" checked={isReimbursable} onChange={(e) => setReimbursable(e.target.checked)} />
+            Company reimbursable
+          </label>
+          <span className="muted small">
+            {reimbursable === null ? (
+              automaticValue ? "Automatic: matches your reimbursement rule (e.g. weekday ride)." : "Automatic: set by your reimbursement rule."
+            ) : (
+              <>
+                Set by you.{" "}
+                <button type="button" className="link-button" onClick={() => setReimbursable(null)}>
+                  Use automatic
+                </button>
+              </>
+            )}
+          </span>
+        </div>
 
         <label className={`${fieldClass("notes")} span-2`}>
           <span>Notes</span>
