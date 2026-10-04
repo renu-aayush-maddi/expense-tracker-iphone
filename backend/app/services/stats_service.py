@@ -8,7 +8,7 @@ from decimal import Decimal
 from sqlalchemy import case, extract, func, select
 from sqlalchemy.orm import Session
 
-from app.models import PendingImport, Transaction
+from app.models import PendingImport, Transaction, visible_to_owner
 
 ZERO = Decimal("0.00")
 
@@ -31,7 +31,7 @@ def _group_totals(db: Session, user_id: uuid.UUID, column, start: date, end: dat
     label = func.coalesce(column, unknown)
     rows = db.execute(
         select(label.label("label"), func.sum(Transaction.amount), func.count())
-        .where(Transaction.user_id == user_id, Transaction.transaction_date.between(start, end))
+        .where(visible_to_owner(user_id), Transaction.transaction_date.between(start, end))
         .group_by(label)
         .order_by(func.sum(Transaction.amount).desc())
     ).all()
@@ -39,7 +39,7 @@ def _group_totals(db: Session, user_id: uuid.UUID, column, start: date, end: dat
 
 
 def get_dashboard(db: Session, user_id: uuid.UUID, year: int, month: int, today: date) -> dict:
-    mine = Transaction.user_id == user_id
+    mine = visible_to_owner(user_id)
     month_start, month_end = _month_range(year, month)
     in_month = Transaction.transaction_date.between(month_start, month_end)
 

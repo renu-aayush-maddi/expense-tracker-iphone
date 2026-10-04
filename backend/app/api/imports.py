@@ -11,7 +11,10 @@ DELETE /api/imports/pending/{id}               <- discard
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,7 +29,7 @@ from app.db.session import get_db
 from app.models import PendingImport, User
 from app.schemas.imports import ImportResponse, PendingImportDetailOut, PendingImportOut, PhonePeImportRequest
 from app.schemas.transaction import TransactionCreate, TransactionDetailOut, TransactionOut
-from app.services import transaction_importer
+from app.services import receipt_image, security_service, transaction_importer
 from app.services.transaction_importer import SimilarTransactionError
 from app.services.transaction_service import DuplicateTransactionError
 
@@ -45,31 +48,112 @@ STATUS_CODES = {
 }
 
 
+IMPORT_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {"file": {"type": "string", "format": "binary",
+                                            "description": "Original PhonePe receipt image (JPEG, PNG, HEIC/HEIF)"}},
+                }
+            },
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["ocr_text"],
+                    "properties": {"ocr_text": {"type": "string", "description": "Legacy: OCR text from the phone"}},
+                }
+            },
+        },
+    }
+}
+
+
+def _bad_request(message: str, code: int = status.HTTP_400_BAD_REQUEST) -> HTTPException:
+    return HTTPException(status_code=code, detail=message)
+
+
+async def _read_receipt_upload(request: Request) -> bytes:
+    """The `file` part of a multipart upload, size-checked. Content is validated later from its bytes."""
+    try:
+        form = await request.form(max_files=1, max_fields=5)
+    except HTTPException:
+        raise
+    except Exception:  # malformed multipart body, too many files...
+        raise _bad_request("Malformed upload. Send the receipt as multipart/form-data with a 'file' field.")
+    upload = form.get("file")
+    if upload is None or isinstance(upload, str):
+        raise _bad_request("Attach the receipt image in a form field named 'file'.")
+    data = await upload.read(settings.max_upload_bytes + 1)
+    await upload.close()
+    if len(data) > settings.max_upload_bytes:
+        raise _bad_request(f"The image is larger than {settings.MAX_UPLOAD_MB} MB.", status.HTTP_413_CONTENT_TOO_LARGE)
+    return data
+
+
 @router.post(
     "/transactions/import/phonepe",
     response_model=ImportResponse,
     responses={200: {"model": ImportResponse}, 202: {"model": ImportResponse}, 422: {"model": ImportResponse}},
     status_code=status.HTTP_201_CREATED,
+    openapi_extra=IMPORT_OPENAPI,
 )
-def import_phonepe(
-    payload: PhonePeImportRequest,
+async def import_phonepe(
+    request: Request,
     current_user: User = Depends(get_import_user),
     db: Session = Depends(get_db),
 ):
-    import_limiter.hit(f"import:{current_user.id}")
+    """Import a PhonePe receipt.
 
-    outcome = transaction_importer.import_text(db, current_user.id, SOURCE_PHONEPE, payload.ocr_text, today_local())
-    # Log only the outcome – never the OCR text, it contains financial details.
-    logger.info("PhonePe import for user %s: %s", current_user.id, outcome.status)
+    * multipart/form-data with `file=<original receipt image>` (JPEG/PNG/HEIC):
+      server OCR -> existing parser -> validation -> OpenAI Vision only if OCR is unsure.
+    * application/json `{"ocr_text": "..."}`: legacy text import (phone-side OCR).
+    """
+    import_limiter.hit(f"import:{current_user.id}")
+    content_type = (request.headers.get("content-type") or "").lower()
+    today = today_local()
+
+    if content_type.startswith("multipart/form-data"):
+        data = await _read_receipt_upload(request)
+        try:
+            receipt = receipt_image.load_receipt_image(data)
+        except receipt_image.ImageValidationError as error:
+            raise _bad_request(str(error))
+        # OCR is CPU-bound: run it off the event loop.
+        outcome = await run_in_threadpool(transaction_importer.import_image, db, current_user.id, receipt, today)
+    elif content_type.startswith("application/json"):
+        try:
+            payload = PhonePeImportRequest.model_validate(await request.json())
+        except ValidationError as error:
+            raise RequestValidationError(error.errors()) from None
+        except ValueError:
+            raise _bad_request("The request body isn't valid JSON.")
+        outcome = await run_in_threadpool(
+            transaction_importer.import_text, db, current_user.id, SOURCE_PHONEPE, payload.ocr_text, today
+        )
+        outcome.extraction_source = outcome.extraction_source or "text"
+    else:
+        raise _bad_request("Send the receipt image as multipart/form-data (field 'file').",
+                           status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
+    # Log only the outcome and source – never receipt content.
+    security_service.record_event(db, security_service.IMPORT_REQUEST, request=request, user=current_user,
+                                  success=outcome.status in ("created", "duplicate"),
+                                  reason=f"{outcome.status} via {outcome.extraction_source}")
+    logger.info("PhonePe import for user %s: %s (source=%s)", current_user.id, outcome.status, outcome.extraction_source)
 
     response = ImportResponse(
         success=outcome.status in ("created", "duplicate"),
         status=outcome.status,
         message=outcome.message,
+        extraction_source=outcome.extraction_source,
         transaction=TransactionOut.model_validate(outcome.transaction) if outcome.transaction else None,
         existing_transaction_id=outcome.existing.id if outcome.existing else None,
         review_id=outcome.pending.id if outcome.pending else None,
-        parsed_data=outcome.parse_result.to_dict() if outcome.status in ("review_required", "invalid") else None,
+        parsed_data=outcome.parse_result.to_dict() if outcome.status in ("review_required", "invalid") and outcome.parse_result else None,
         issues=outcome.parse_result.issues if outcome.parse_result else [],
     )
     return JSONResponse(status_code=STATUS_CODES[outcome.status], content=response.model_dump(mode="json"))
@@ -101,7 +185,20 @@ def reprocess_pending(current_user: User = Depends(get_current_user), db: Sessio
 
 @router.get("/imports/pending/{pending_id}", response_model=PendingImportDetailOut)
 def get_pending(pending_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _pending_or_404(db, current_user, pending_id)
+    pending = _pending_or_404(db, current_user, pending_id)
+    detail = PendingImportDetailOut.model_validate(pending, from_attributes=True)
+    detail.has_image = pending.image_content_type is not None  # without loading the image bytes
+    return detail
+
+
+@router.get("/imports/pending/{pending_id}/image")
+def get_pending_image(pending_id: uuid.UUID, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """The receipt image of an image import awaiting review – only for its owner, never cached publicly."""
+    pending = _pending_or_404(db, current_user, pending_id)
+    if not pending.image_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No image stored for this import.")
+    return Response(content=pending.image_data, media_type=pending.image_content_type or "image/jpeg",
+                    headers={"Cache-Control": "private, no-store", "Content-Disposition": "inline"})
 
 
 @router.post(

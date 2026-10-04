@@ -10,9 +10,11 @@ services:
     runtime: python
     plan: free
     rootDir: backend
-    buildCommand: pip install -r requirements.txt
+    # RapidOCR is installed with --no-deps so only headless OpenCV is used (no libGL on Render).
+    buildCommand: pip install -r requirements.txt && pip install --no-deps -r requirements-ocr.txt
     # Migrations run on every start (safe: Alembic only applies new ones).
-    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"
+    # Client IPs come from CLIENT_IP_HEADERS (set by Cloudflare), not X-Forwarded-For, which is spoofable on Render.
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
@@ -39,6 +41,22 @@ services:
         sync: false # optional: AI fallback for hard-to-read receipts
       - key: OPENAI_MODEL
         value: gpt-5.4-mini
+      # Receipt image import: server OCR first, OpenAI Vision only when OCR is unsure.
+      - key: OPENAI_VISION_MODEL
+        value: gpt-5.4-mini
+      - key: OCR_MAX_IMAGE_SIDE
+        value: "1000" # keeps OCR ~350 MB RAM on the free 512 MB instance; raise on bigger plans
+      - key: MAX_UPLOAD_MB
+        value: "10"
+      # Render sits behind Cloudflare, which overwrites these headers with the real client IP.
+      - key: CLIENT_IP_HEADERS
+        value: true-client-ip,cf-connecting-ip
+      - key: INITIAL_SUPER_ADMIN_EMAIL
+        sync: false # your own (already registered) email; promoted once, only if no super admin exists
+      - key: ADMIN_SESSION_HOURS
+        value: "12"
+      - key: ADMIN_IDLE_TIMEOUT_MINUTES
+        value: "60"
 
   # ---------------- Frontend: React (Render Static Site) ----------------
   - type: web
@@ -59,6 +77,13 @@ services:
       - path: /*
         name: X-Content-Type-Options
         value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      # Only our own scripts may run; the API is called over HTTPS. Limits the damage of any XSS.
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
     envVars:
       - key: VITE_API_URL
         sync: false # e.g. https://expense-tracker-api.onrender.com

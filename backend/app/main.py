@@ -4,6 +4,7 @@ Run locally:   uvicorn app.main:app --reload
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -12,12 +13,29 @@ from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
 from app.core.config import settings
-from app.core.middleware import BodySizeLimitMiddleware
+from app.core import metrics
+from app.core.middleware import BodySizeLimitMiddleware, IpBlockMiddleware, RequestMetricsMiddleware
+from app.db.session import SessionLocal
 
+# Three separate log streams: "app" (application), "security" (authentication
+# events) and "audit" (admin actions). None of them ever log passwords, tokens or OCR text.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    from app.services import admin_bootstrap
+
+    try:
+        admin_bootstrap.promote_initial_super_admin(SessionLocal)
+    except Exception:  # never prevent the app from starting
+        logger.exception("Initial super admin bootstrap failed")
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title=settings.APP_NAME,
     version="1.0.0",
     docs_url="/docs" if settings.ENABLE_DOCS else None,
@@ -25,15 +43,22 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.ENABLE_DOCS else None,
 )
 
-# ----- Middleware -----
-app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BYTES)
+# ----- Middleware (last added runs first) -----
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=settings.MAX_REQUEST_BYTES,
+    # Receipt images: the image limit plus room for the multipart envelope.
+    path_limits={"/api/transactions/import/phonepe": settings.max_upload_bytes + 64 * 1024},
+)
+app.add_middleware(IpBlockMiddleware, session_factory=SessionLocal)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=False,  # we use Bearer tokens, not cookies
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+app.add_middleware(RequestMetricsMiddleware)
 
 
 @app.middleware("http")
@@ -66,6 +91,7 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 async def unhandled_error_handler(request: Request, exc: Exception):
     """Never leak stack traces to users. Details go to the server log only."""
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    metrics.record_error(request.method, request.url.path, exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Something went wrong on our side. Please try again."},

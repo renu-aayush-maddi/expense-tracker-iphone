@@ -11,7 +11,8 @@ def test_register_returns_token_and_user(client):
     assert body["access_token"]
     assert body["token_type"] == "bearer"
     assert body["user"]["email"] == "new@example.com"
-    assert "password" not in str(body).lower()
+    assert "hashed_password" not in body["user"] and "password" not in body["user"]
+    assert "$2b$" not in str(body)  # no bcrypt hash anywhere
 
 
 def test_register_duplicate_email_is_409(client):

@@ -17,7 +17,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import ReimbursementSettings, Transaction
+from app.models import ReimbursementSettings, Transaction, visible_to_owner
 
 DEFAULT_KEYWORDS = [
     "uber",
@@ -113,7 +113,7 @@ def reapply_rule(db: Session, user_id: uuid.UUID) -> int:
     changed = 0
     transactions = db.scalars(
         select(Transaction).where(
-            Transaction.user_id == user_id,
+            visible_to_owner(user_id),
             (Transaction.reimbursable_set_by != SET_BY_USER) | Transaction.reimbursable_set_by.is_(None),
         )
     ).all()

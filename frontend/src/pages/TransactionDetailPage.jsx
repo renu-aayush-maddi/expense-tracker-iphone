@@ -13,6 +13,8 @@ const EXTRACTION_LABELS = {
   rules: "Automatic parser",
   ai: "AI-assisted (receipt was hard to read)",
   reviewed: "You (reviewed import)",
+  ocr: "Server OCR (receipt image)",
+  openai_fallback: "AI vision fallback (OCR was unsure)",
 };
 
 function Detail({ label, value, mono = false }) {

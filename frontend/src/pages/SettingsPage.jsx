@@ -2,6 +2,7 @@ import { useState } from "react";
 import Alert from "../components/Alert";
 import Loading from "../components/Loading";
 import ReimbursementSettings from "../components/ReimbursementSettings";
+import ChangePasswordPage from "./ChangePasswordPage";
 import { useApi } from "../hooks/useApi";
 import { useAuth } from "../hooks/useAuth";
 import { API_URL } from "../services/api";
@@ -224,6 +225,12 @@ export default function SettingsPage() {
         <button type="button" className="btn btn-secondary" onClick={logout}>
           Log out
         </button>
+      </section>
+
+      <section className="card">
+        <h2>Change password</h2>
+        <p className="muted">Changing your password logs out your other devices.</p>
+        <ChangePasswordPage />
       </section>
 
       <ReimbursementSettings />

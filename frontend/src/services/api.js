@@ -51,6 +51,40 @@ function buildUrl(path, params) {
   return url.toString();
 }
 
+/** POST a multipart form (file upload). Returns the JSON body; throws ApiError on failure. */
+export async function apiUpload(path, formData) {
+  const token = tokenStore.get();
+  let response;
+  try {
+    response = await fetch(buildUrl(path), {
+      method: "POST",
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData, // the browser sets the multipart boundary
+    });
+  } catch {
+    throw new ApiError("Can't reach the server. If it was asleep (Render free plan), wait a minute and try again.", 0, null);
+  }
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    if (response.status === 401 && token && unauthorizedHandler) unauthorizedHandler();
+    throw new ApiError(friendlyMessage(response.status, data), response.status, data);
+  }
+  return data;
+}
+
+/** GET an authenticated file as a Blob (e.g. a receipt image for the review screen). */
+export async function apiBlob(path) {
+  const token = tokenStore.get();
+  const response = await fetch(buildUrl(path), { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!response.ok) throw new ApiError(STATUS_MESSAGES[response.status] || "Couldn't load the file.", response.status, null);
+  return response.blob();
+}
+
 /** Download a file (e.g. CSV) from an authenticated endpoint. */
 export async function apiDownload(path, params, filename) {
   const token = tokenStore.get();

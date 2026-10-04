@@ -1,5 +1,6 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import ChangePasswordPage from "../pages/ChangePasswordPage";
 import Loading from "./Loading";
 
 /** Only for logged-in users; others are sent to /login. */
@@ -8,6 +9,8 @@ export function ProtectedRoute() {
   const location = useLocation();
   if (loading) return <Loading full />;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  // After an admin password reset the user must pick a new password before anything else.
+  if (user.must_change_password) return <ChangePasswordPage forced />;
   return <Outlet />;
 }
 

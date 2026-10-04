@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, UniqueConstraint, Uuid, func
+from sqlalchemy import JSON, DateTime, ForeignKey, LargeBinary, String, Text, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -29,4 +29,8 @@ class PendingImport(Base):
     raw_text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     parsed_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     issues: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # For image imports awaiting review: a downscaled JPEG of the receipt so you can check it.
+    # Only kept while the import is pending (deleted when saved/discarded); served to the owner only.
+    image_data: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    image_content_type: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

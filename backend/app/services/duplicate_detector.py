@@ -35,6 +35,7 @@ def find_by_identifiers(
     if not conditions:
         return None
 
+    # Includes admin soft-deleted rows on purpose: the same receipt can't be re-imported.
     query = select(Transaction).where(Transaction.user_id == user_id, or_(*conditions))
     if exclude_id is not None:
         query = query.where(Transaction.id != exclude_id)
@@ -52,6 +53,7 @@ def find_by_fallback(
 ) -> Transaction | None:
     query = select(Transaction).where(
         Transaction.user_id == user_id,
+        Transaction.deleted_at.is_(None),
         Transaction.transaction_date == transaction_date,
         Transaction.amount == amount,
         func.lower(Transaction.merchant_name) == merchant_name.strip().lower(),

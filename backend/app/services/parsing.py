@@ -17,6 +17,8 @@ EARLIEST_YEAR = 2016  # UPI/PhonePe launched in 2016
 METHOD_RULES = "rules"  # regex parser only
 METHOD_AI = "ai"  # regex parser + LLM filled in missing fields
 METHOD_REVIEWED = "reviewed"  # confirmed by the user on the review screen
+METHOD_OCR = "ocr"  # receipt image read by server OCR + the parser
+METHOD_OPENAI_FALLBACK = "openai_fallback"  # receipt image read by OpenAI Vision (OCR was unsure)
 
 
 @dataclass

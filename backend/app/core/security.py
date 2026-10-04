@@ -28,31 +28,40 @@ def verify_password(password: str, hashed_password: str) -> bool:
         return False
 
 
-def create_access_token(subject: str) -> str:
+def create_access_token(subject: str, session_id: str, expires_delta: timedelta | None = None) -> str:
+    """Signed token naming the user and their server-side session. Revoking the
+    session (logout, admin action, password change) makes the token useless."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,
+        "sid": session_id,
         "iat": now,
-        "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        "exp": now + (expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)),
         "type": "access",
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
-def decode_access_token(token: str) -> str | None:
-    """Return the user id inside a valid token, or None if invalid/expired."""
+def decode_access_token(token: str) -> dict | None:
+    """Return {"sub", "sid"} for a valid token, or None if invalid/expired.
+    Tokens from before server-side sessions (no "sid") are rejected."""
     try:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET,
             algorithms=[settings.JWT_ALGORITHM],
-            options={"require": ["exp", "sub"]},
+            options={"require": ["exp", "sub", "sid"]},
         )
     except jwt.PyJWTError:
         return None
     if payload.get("type") != "access":
         return None
-    return payload.get("sub")
+    return {"sub": payload["sub"], "sid": payload["sid"]}
+
+
+def generate_temporary_password() -> str:
+    """For admin password resets: readable, high-entropy, shown to the admin once."""
+    return "-".join(secrets.token_urlsafe(4) for _ in range(4))
 
 
 def generate_import_token() -> str:

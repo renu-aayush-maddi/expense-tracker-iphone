@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.constants import CATEGORIES, PAYMENT_METHODS, SOURCE_MANUAL, SOURCES
-from app.models import Transaction
+from app.models import Transaction, visible_to_owner
 from app.services import duplicate_detector, reimbursement
 
 
@@ -99,7 +99,7 @@ def list_transactions(
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[list[Transaction], int]:
-    base = _apply_filters(select(Transaction).where(Transaction.user_id == user_id), filters)
+    base = _apply_filters(select(Transaction).where(visible_to_owner(user_id)), filters)
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
 
@@ -112,14 +112,14 @@ def list_transactions(
 
 
 def list_all_for_export(db: Session, user_id: uuid.UUID, filters: TransactionFilters, limit: int = 5000) -> list[Transaction]:
-    query = _apply_filters(select(Transaction).where(Transaction.user_id == user_id), filters)
+    query = _apply_filters(select(Transaction).where(visible_to_owner(user_id)), filters)
     query = query.order_by(Transaction.transaction_date, Transaction.transaction_time.nulls_last(), Transaction.created_at)
     return list(db.scalars(query.limit(limit)).all())
 
 
 def get_transaction(db: Session, user_id: uuid.UUID, transaction_id: uuid.UUID) -> Transaction | None:
     return db.scalar(
-        select(Transaction).where(Transaction.id == transaction_id, Transaction.user_id == user_id)
+        select(Transaction).where(Transaction.id == transaction_id, visible_to_owner(user_id))
     )
 
 
@@ -185,7 +185,7 @@ def get_filter_options(db: Session, user_id: uuid.UUID) -> dict:
 
     def distinct(column) -> list[str]:
         rows = db.scalars(
-            select(column).where(Transaction.user_id == user_id, column.is_not(None)).distinct()
+            select(column).where(visible_to_owner(user_id), column.is_not(None)).distinct()
         ).all()
         return [r for r in rows if r]
 
@@ -203,7 +203,7 @@ def get_last_category_for_merchant(db: Session, user_id: uuid.UUID, merchant_nam
     return db.scalar(
         select(Transaction.category)
         .where(
-            Transaction.user_id == user_id,
+            visible_to_owner(user_id),
             func.lower(Transaction.merchant_name) == merchant_name.strip().lower(),
         )
         .order_by(Transaction.updated_at.desc())

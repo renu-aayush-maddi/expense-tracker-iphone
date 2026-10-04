@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { isAdmin } from "../admin/adminService";
 import { useAuth } from "../hooks/useAuth";
 
 const LINKS = [
@@ -36,6 +37,11 @@ export default function Layout() {
                 {link.label}
               </NavLink>
             ))}
+            {isAdmin(user) && (
+              <NavLink to="/admin" className="nav-link nav-admin" onClick={() => setMenuOpen(false)}>
+                Admin
+              </NavLink>
+            )}
             <div className="nav-user">
               <span className="muted small" title={user?.email}>
                 {user?.full_name || user?.email}

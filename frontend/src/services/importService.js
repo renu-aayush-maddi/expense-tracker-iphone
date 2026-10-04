@@ -1,4 +1,4 @@
-import { apiRequest, ApiError } from "./api";
+import { apiBlob, apiRequest, apiUpload, ApiError } from "./api";
 
 export const importService = {
   // The import endpoint returns a useful JSON body even for 422 "invalid",
@@ -11,6 +11,18 @@ export const importService = {
       throw error;
     }
   },
+  // Upload the ORIGINAL receipt image: server OCR + AI fallback happen on the backend.
+  importPhonePeImage: async (file) => {
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      return await apiUpload("/api/transactions/import/phonepe", form);
+    } catch (error) {
+      if (error instanceof ApiError && error.data?.status) return error.data;
+      throw error;
+    }
+  },
+  pendingImage: (id) => apiBlob(`/api/imports/pending/${id}/image`),
   listPending: () => apiRequest("/api/imports/pending"),
   reprocessPending: () => apiRequest("/api/imports/pending/reprocess", { method: "POST" }),
   getPending: (id) => apiRequest(`/api/imports/pending/${id}`),

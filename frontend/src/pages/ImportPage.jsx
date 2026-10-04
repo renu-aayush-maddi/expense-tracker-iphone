@@ -28,10 +28,18 @@ UTR:
 Message:
 UPIIntent`;
 
+const SOURCE_TEXT = {
+  ocr: "Read by server OCR.",
+  openai_fallback: "Read with the AI vision fallback (OCR wasn't sure).",
+  text: "Read from pasted text.",
+};
+const MAX_UPLOAD_MB = 10;
+
 function ImportResult({ result }) {
   if (result.status === "created") {
     return (
       <Alert type="success" title={result.message}>
+        {SOURCE_TEXT[result.extraction_source] && <span>{SOURCE_TEXT[result.extraction_source]} </span>}
         <Link to={`/transactions/${result.transaction.id}`}>Open transaction</Link>
       </Alert>
     );
@@ -56,6 +64,37 @@ export default function ImportPage() {
   const pending = useApi(() => importService.listPending(), []);
   const [retrying, setRetrying] = useState(false);
   const [retryResult, setRetryResult] = useState("");
+  const [file, setFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadResult, setUploadResult] = useState(null);
+  const [uploadError, setUploadError] = useState("");
+
+  // Upload the original receipt image: the server runs OCR (and the AI fallback if needed).
+  const handleUpload = async (event) => {
+    event.preventDefault();
+    setUploadError("");
+    setUploadResult(null);
+    if (!file) return;
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      setUploadError(`The image is larger than ${MAX_UPLOAD_MB} MB.`);
+      return;
+    }
+    setUploading(true);
+    try {
+      const response = await importService.importPhonePeImage(file);
+      if (response.status === "review_required") {
+        navigate(`/imports/${response.review_id}`);
+        return;
+      }
+      setUploadResult(response);
+      if (response.status === "created") setFile(null);
+      pending.reload();
+    } catch (err) {
+      setUploadError(err.message);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   // Re-run every pending import through the latest parser (+ AI fallback).
   const handleRetryAll = async () => {
@@ -148,7 +187,36 @@ export default function ImportPage() {
       </section>
 
       <section className="card">
-        <h2>Paste receipt text</h2>
+        <h2>Upload receipt image</h2>
+        <p className="muted small">
+          The original PhonePe receipt (JPEG, PNG or HEIC, up to {MAX_UPLOAD_MB} MB). The server reads it with OCR.
+          The AI is only asked when OCR isn't sure, and anything uncertain goes to review.
+        </p>
+        <form className="form" onSubmit={handleUpload}>
+          {uploadError && <Alert type="error">{uploadError}</Alert>}
+          {uploadResult && <ImportResult result={uploadResult} />}
+          <label className="field">
+            <span>Receipt image</span>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/heic,image/heif,.heic,.heif"
+              onChange={(e) => {
+                setFile(e.target.files?.[0] || null);
+                setUploadResult(null);
+              }}
+            />
+          </label>
+          <div className="form-actions">
+            <button type="submit" className="btn btn-primary" disabled={!file || uploading}>
+              {uploading ? "Reading receipt…" : "Upload & import"}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section className="card">
+        <h2>Paste receipt text (legacy)</h2>
+        <p className="muted small">For text already extracted on the phone. Image upload is more reliable.</p>
         <form className="form" onSubmit={handleImport}>
           {error && <Alert type="error">{error}</Alert>}
           {result && <ImportResult result={result} />}

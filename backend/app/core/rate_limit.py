@@ -18,10 +18,15 @@ class RateLimiter:
         self._hits: dict[str, deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
 
+    MAX_KEYS = 10_000
+
     def hit(self, key: str) -> None:
         """Record a request for `key`; raise 429 if the limit is exceeded."""
         now = time.monotonic()
         with self._lock:
+            if len(self._hits) > self.MAX_KEYS:  # forget idle keys so memory stays bounded
+                for stale in [k for k, v in self._hits.items() if not v or now - v[-1] > self.window_seconds]:
+                    del self._hits[stale]
             hits = self._hits[key]
             while hits and now - hits[0] > self.window_seconds:
                 hits.popleft()

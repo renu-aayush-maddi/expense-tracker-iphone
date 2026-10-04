@@ -5,7 +5,7 @@ import { formatCurrency, formatCurrencyShort } from "../../utils/format";
  * Two-part stacked columns, e.g. "Your own" + "Company reimburses" per month.
  * series: [{ key, label, color }] bottom -> top. The legend is always shown (2+ series).
  */
-function StackedTooltip({ active, payload, label, series, labelFormatter }) {
+function StackedTooltip({ active, payload, label, series, labelFormatter, valueFormatter = formatCurrency }) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload;
   const total = series.reduce((sum, s) => sum + row[s.key], 0);
@@ -16,13 +16,13 @@ function StackedTooltip({ active, payload, label, series, labelFormatter }) {
         <div key={s.key} className="tooltip-row">
           <span className="legend-swatch" style={{ background: s.color }} aria-hidden="true" />
           <span>{s.label}</span>
-          <strong>{formatCurrency(row[s.key])}</strong>
+          <strong>{valueFormatter(row[s.key])}</strong>
         </div>
       ))}
       <div className="tooltip-row tooltip-total">
         <span />
         <span>Total</span>
-        <strong>{formatCurrency(total)}</strong>
+        <strong>{valueFormatter(total)}</strong>
       </div>
     </div>
   );
@@ -41,7 +41,9 @@ export function Legend({ series }) {
   );
 }
 
-export default function StackedColumnChart({ data, series, xKey = "label", height = 240, tickFormatter, tableCaption }) {
+export default function StackedColumnChart({
+  data, series, xKey = "label", height = 240, tickFormatter, tooltipLabel, tableCaption, valueFormatter = formatCurrency,
+}) {
   const rows = data.map((d) => {
     const row = { ...d };
     series.forEach((s) => (row[s.key] = Number(d[s.key]) || 0));
@@ -68,7 +70,8 @@ export default function StackedColumnChart({ data, series, xKey = "label", heigh
                 minTickGap={8}
               />
               <YAxis
-                tickFormatter={formatCurrencyShort}
+                tickFormatter={valueFormatter === formatCurrency ? formatCurrencyShort : undefined}
+                allowDecimals={valueFormatter === formatCurrency}
                 tickLine={false}
                 axisLine={false}
                 width={56}
@@ -76,7 +79,7 @@ export default function StackedColumnChart({ data, series, xKey = "label", heigh
               />
               <Tooltip
                 cursor={{ fill: "var(--hover)" }}
-                content={<StackedTooltip series={series} />}
+                content={<StackedTooltip series={series} labelFormatter={tooltipLabel} valueFormatter={valueFormatter} />}
                 isAnimationActive={false}
               />
               {series.map((s) => (
@@ -121,7 +124,7 @@ export default function StackedColumnChart({ data, series, xKey = "label", heigh
                     <td>{r[xKey]}</td>
                     {series.map((s) => (
                       <td key={s.key} className="num">
-                        {formatCurrency(r[s.key])}
+                        {valueFormatter(r[s.key])}
                       </td>
                     ))}
                   </tr>

@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.auth import login_limiter
+from app.api.admin.common import reauth_limiter
 from app.api.imports import import_limiter, reprocess_limiter
 from app.db.base import Base
 from app.db.session import engine
@@ -66,6 +67,13 @@ def clean_tables():
     login_limiter.reset()
     import_limiter.reset()
     reprocess_limiter.reset()
+    reauth_limiter.reset()
+    from app.api.deps import _denied_throttle
+
+    _denied_throttle.reset()
+    from app.services import ip_block_service
+
+    ip_block_service.invalidate_cache()
 
 
 @pytest.fixture
@@ -88,3 +96,26 @@ def auth_headers(client):
 @pytest.fixture
 def sample_ocr():
     return SAMPLE_OCR
+
+
+def make_user(client, email, role=None, password="supersecret123"):
+    """Register an account, optionally give it a role (directly in the DB, as the
+    CLI would), and return headers for a fresh login."""
+    from sqlalchemy import select
+
+    from app.db.session import SessionLocal
+    from app.models import User
+
+    register(client, email=email, password=password)
+    if role:
+        with SessionLocal() as db:
+            user = db.scalar(select(User).where(User.email == email))
+            user.role = role
+            db.commit()
+    response = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def user_id(client, headers):
+    return client.get("/api/auth/me", headers=headers).json()["id"]

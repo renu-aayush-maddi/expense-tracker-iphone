@@ -23,6 +23,11 @@ from app.core.constants import DEFAULT_CATEGORY, SOURCE_MANUAL
 from app.db.base import Base
 
 
+def visible_to_owner(user_id):
+    """Condition for the transactions a user sees: theirs and not soft-deleted by an admin."""
+    return (Transaction.user_id == user_id) & Transaction.deleted_at.is_(None)
+
+
 class Transaction(Base):
     __tablename__ = "transactions"
     __table_args__ = (
@@ -32,6 +37,7 @@ class Transaction(Base):
         UniqueConstraint("user_id", "utr", name="uq_transactions_user_utr"),
         CheckConstraint("amount > 0", name="ck_transactions_amount_positive"),
         Index("ix_transactions_user_date", "user_id", "transaction_date"),
+        Index("ix_transactions_created_at", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -66,6 +72,11 @@ class Transaction(Base):
     # Who decided: "rule" (automatic, re-evaluated when the rule changes) or "user" (never overwritten).
     reimbursable_set_by: Mapped[str | None] = mapped_column(String(10))
     notes: Mapped[str | None] = mapped_column(Text)
+
+    # Soft delete (used by admins): the row stays for the audit trail but is hidden everywhere.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    deleted_reason: Mapped[str | None] = mapped_column(Text)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(

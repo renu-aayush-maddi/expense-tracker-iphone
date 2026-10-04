@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.transaction import TransactionOut
 
@@ -21,6 +21,8 @@ class ImportResponse(BaseModel):
     status: ImportStatus
     # Human-friendly one-liner. The iPhone Shortcut simply displays this.
     message: str
+    # How the receipt was read: "ocr" (server OCR), "openai_fallback" (vision fallback) or "text" (legacy upload)
+    extraction_source: str | None = None
     transaction: TransactionOut | None = None
     existing_transaction_id: uuid.UUID | None = None
     review_id: uuid.UUID | None = None
@@ -29,6 +31,8 @@ class ImportResponse(BaseModel):
 
 
 class PendingImportOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     source: str
     parsed_data: dict[str, Any]
@@ -38,3 +42,4 @@ class PendingImportOut(BaseModel):
 
 class PendingImportDetailOut(PendingImportOut):
     raw_text: str
+    has_image: bool = False

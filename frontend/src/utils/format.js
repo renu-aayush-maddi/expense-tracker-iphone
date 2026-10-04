@@ -27,7 +27,12 @@ const MONTHS_LONG = [
 /** "2026-10-03" -> "3 Oct 2026" (parsed as a plain date, no timezone shifts). */
 export function formatDate(isoDate) {
   if (!isoDate) return "—";
-  const [year, month, day] = isoDate.slice(0, 10).split("-").map(Number);
+  if (isoDate.length > 10) {
+    // a full timestamp: show the date in the browser's timezone
+    const d = new Date(isoDate);
+    return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+  }
+  const [year, month, day] = isoDate.split("-").map(Number);
   return `${day} ${MONTHS[month - 1]} ${year}`;
 }
 

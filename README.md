@@ -3,7 +3,8 @@
 A personal expense tracker with a React dashboard, a FastAPI backend, PostgreSQL storage, and **automatic PhonePe imports from an iPhone Shortcut**.
 
 ```
-PhonePe → Share Receipt → iPhone Shortcut (OCR only) → FastAPI → Parser → Duplicate check → PostgreSQL → React dashboard
+PhonePe → Share Receipt → original image → FastAPI → server OCR → PhonePe parser → validation
+        → (OpenAI Vision fallback only if OCR is unsure) → duplicate check → PostgreSQL → React dashboard
 ```
 
 ---
@@ -29,7 +30,7 @@ PhonePe → Share Receipt → iPhone Shortcut (OCR only) → FastAPI → Parser 
 17. [API reference](#17-api-reference)
 18. [Extending: new import sources](#18-extending-new-import-sources)
 
-Also: [Company reimbursements](#14b-company-reimbursements)
+Also: [Company reimbursements](#14b-company-reimbursements) · **[Admin console → docs/ADMIN.md](docs/ADMIN.md)**
 
 ---
 
@@ -43,7 +44,10 @@ What you can do:
 - **Import PhonePe payments automatically**: share the receipt to the "Phonepay Automation" Shortcut and the expense appears in the app
 - Review imports that couldn't be read confidently. Nothing uncertain is saved silently.
 - Duplicate protection: sharing the same receipt twice never creates two transactions
+- **Admin console** at `/admin` (roles, user management and blocking, sessions, IP blocking, audit log, security monitoring, reports). See **[docs/ADMIN.md](docs/ADMIN.md)**
 - **Company reimbursements**: weekday rides (Uber / Ola / Rapido) are marked "Company" automatically; flip any transaction with one click, see what the company owes you on the dashboard, and download the month's claim as CSV
+
+**Receipt images are read on the server.** The import endpoint accepts the original receipt image. The backend runs its own OCR (the iPhone's OCR isn't needed any more) and feeds the text to the same PhonePe parser. OpenAI Vision is used **only as a fallback** when OCR is unsure. Its answer goes through the same backend validation, and if OCR and AI disagree the receipt goes to review instead of being saved. The older OCR-text upload still works.
 
 **The key design decision:** the iPhone Shortcut only does OCR and one HTTP request. **All the intelligence lives in the backend**: parsing, amount and merchant extraction, IDs, date and time, account, category, validation, duplicate detection and storage. If PhonePe changes its receipt layout, you only update `backend/app/services/phonepe_parser.py`.
 
@@ -79,7 +83,7 @@ expense-tracker/
 │   │   ├── services/       # business logic: parsers, importer, categorizer, duplicates, stats
 │   │   └── main.py         # FastAPI app, CORS, error handlers, security headers
 │   ├── alembic/            # database migrations
-│   ├── tests/              # pytest suite (179 tests)
+│   ├── tests/              # pytest suite (255 tests)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
@@ -120,6 +124,7 @@ JWTs expire after 7 days, and a Shortcut can't log in. So in **Settings** you cr
 |---|---|
 | Frontend | React 19, Vite, React Router, Recharts, plain CSS (no Tailwind) |
 | Backend | Python, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, psycopg 3 |
+| Receipt OCR | RapidOCR (PaddleOCR PP-OCRv6 models on onnxruntime, pip-only), Pillow + pillow-heif for JPEG/PNG/HEIC |
 | Auth | bcrypt password hashing, JWT (PyJWT), hashed personal import tokens |
 | AI fallback (optional) | OpenAI Responses API with structured outputs (`openai` SDK) |
 | Database | PostgreSQL (Supabase in production; any Postgres works, since only `DATABASE_URL` changes) |
@@ -144,6 +149,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
+pip install --no-deps -r requirements-ocr.txt   # the OCR engine (installed without its GUI OpenCV dependency)
 cp .env.example .env                 # then edit DATABASE_URL and JWT_SECRET (see below)
 alembic upgrade head                 # create the tables
 uvicorn app.main:app --reload        # http://localhost:8000  (API docs: /docs)
@@ -196,7 +202,16 @@ You never create tables by hand. `alembic upgrade head` creates them.
 | `MAX_REQUEST_BYTES` | | `65536` | Request size limit |
 | `IMPORT_RATE_LIMIT_PER_MINUTE` | | `30` | Per user |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | | `10` | Per IP |
+| `CLIENT_IP_HEADERS` | ✅ in prod | `true-client-ip,cf-connecting-ip` | Where the real client IP comes from behind Render/Cloudflare. Empty locally. Never `x-forwarded-for`. |
+| `INITIAL_SUPER_ADMIN_EMAIL` | | `you@example.com` | Promotes this already-registered account to super admin at startup, only while none exists |
+| `ADMIN_SESSION_HOURS` / `ADMIN_IDLE_TIMEOUT_MINUTES` | | `12` / `60` | Admin session lifetime and idle timeout |
+| `LOCKOUT_THRESHOLD` / `LOCKOUT_MINUTES` | | `5` / `15` | Temporary account lockout after repeated wrong passwords |
 | `OPENAI_API_KEY` | optional | `sk-…` | Turns on the AI fallback for hard-to-read receipts. Leave empty to disable. |
+| `OPENAI_VISION_MODEL` | | `gpt-5.4-mini` | Vision model for the receipt-image fallback (uses `OPENAI_API_KEY`) |
+| `VISION_FALLBACK_ENABLED` | | `true` | Turn the vision fallback off without removing the key |
+| `MAX_UPLOAD_MB` | | `10` | Largest receipt image accepted |
+| `OCR_MAX_IMAGE_SIDE` | | `1000` | Longest image side given to OCR. 1000 ≈ 350 MB RAM (fits Render's free 512 MB). Raise on bigger plans for more accuracy. |
+| `OCR_MIN_CONFIDENCE` | | `0.80` | Average OCR confidence required before OCR alone is trusted |
 | `OPENAI_MODEL` | | `gpt-5.4-mini` | Any OpenAI model that supports structured outputs |
 | `LLM_FALLBACK_ENABLED` | | `true` | Switch the fallback off without removing the key |
 | `LLM_TIMEOUT_SECONDS` | | `20` | After this, the import goes to review instead |
@@ -294,7 +309,7 @@ Against real PostgreSQL (recommended before deploying):
 TEST_DATABASE_URL=postgresql://YOUR_USER@localhost:5432/expense_tracker_test pytest
 ```
 
-What's covered (179 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, ₹ read as a leading `2`, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; company-reimbursement rule (weekdays, whole-word matching, Ola/Rapido company names), manual overrides, re-applying the rule, filters and CSV export (incl. spreadsheet formula escaping); import tokens; request size limits; dashboard maths.
+What's covered (255 tests): registration, login, `/me`, password hashing, rate limiting; transaction create/read/update/delete, validation, filters, search, pagination, user isolation; PhonePe parsing (amount in every format: ₹, ¥, Rs, INR, spaces, lakhs), contextual amount extraction, transaction ID (spaces, OCR `O`→`0`, `7`→`T`), UTR, account last 4, dates and times; duplicate detection (same receipt, same UTR, same ID, per-user); invalid OCR; real receipt layouts (amount on the account row, every misread ₹ symbol, ₹ read as a leading `2`, UPI handle glued to the merchant); the AI fallback with a mocked model (verified amounts only, no dates as amounts, no identifiers sent, errors fall back to review); review-required flow, confirm, discard and "retry all"; company-reimbursement rule (weekdays, whole-word matching, Ola/Rapido company names), manual overrides, re-applying the rule, filters and CSV export (incl. spreadsheet formula escaping); receipt image import: JPEG/PNG/HEIC uploads, wrong/corrupt/oversized/missing files, import-token auth, OCR success, OCR failure / incomplete / low confidence → vision fallback, vision failure or invalid output → review, OCR-vs-AI disagreement → review, duplicates (ID, UTR, text vs image), bank mapping, categories, review/confirm/retry, no receipt data in logs, and one real-OCR run on a rendered receipt; admin system: authorization matrix for all roles, privilege-escalation and mass-assignment attempts, block/disable/suspend/delete flows, force logout, password reset with forced change, session revocation and admin idle timeout, account lockout, credential-stuffing detection, IP blocking incl. spoofed X-Forwarded-For, append-only audit log, exports, dashboard/reports/system health; import tokens; request size limits; dashboard maths.
 
 ---
 
@@ -378,8 +393,8 @@ Check that `backend/.env` and `frontend/.env` were **not** pushed (`.gitignore` 
 | Region | Singapore (closest to Mumbai) |
 | Root Directory | `backend` |
 | Runtime | Python 3 |
-| Build Command | `pip install -r requirements.txt` |
-| Start Command | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"` |
+| Build Command | `pip install -r requirements.txt && pip install --no-deps -r requirements-ocr.txt` |
+| Start Command | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
 | Health Check Path | `/api/health` (under Advanced) |
 | Instance type | Free |
 
@@ -396,8 +411,11 @@ Environment variables for the backend:
 | `CORS_ORIGINS` | `https://YOUR-FRONTEND.onrender.com` |
 | `ALLOW_REGISTRATION` | `true` (change to `false` after registering) |
 | `APP_TIMEZONE` | `Asia/Kolkata` |
+| `CLIENT_IP_HEADERS` | `true-client-ip,cf-connecting-ip` |
+| `INITIAL_SUPER_ADMIN_EMAIL` | your email after registering (optional, see docs/ADMIN.md) |
 | `OPENAI_API_KEY` | optional: your OpenAI key (enables the AI fallback, see section 14) |
 | `OPENAI_MODEL` | `gpt-5.4-mini` |
+| `OPENAI_VISION_MODEL` | `gpt-5.4-mini` |
 
 **Frontend: New + → Static Site** → same repo:
 
@@ -483,10 +501,40 @@ To change servers later, edit only the Text in step 1. To rotate the token, crea
 
 ## 14. PhonePe import workflow
 
-What happens when you share a receipt:
+### Receipt image import (current)
+
+`POST /api/transactions/import/phonepe` with `multipart/form-data` and `file=<original receipt image>`, authenticated with the personal import token (`Authorization: Bearer etk_…`).
+
+```
+image ─► validate (type from file bytes, ≤ 10 MB, decodable, HEIC→RGB)
+      ─► server OCR (RapidOCR)            iPhone OCR is no longer used
+      ─► existing PhonePe parser + validation
+      ─► duplicate check by transaction ID / UTR   (before any AI call)
+      ─► OCR confident?  ── yes ─► use OCR result                       extraction_source = "ocr"
+                         └─ no ──► OpenAI Vision reads the ORIGINAL image → format checks + same validation
+                                     ├─ OCR and AI disagree on amount/date/ID/UTR/merchant/account ─► review
+                                     ├─ still uncertain, or AI failed/unavailable ─► review
+                                     └─ ok ─► use AI result (gaps filled from OCR)  extraction_source = "openai_fallback"
+      ─► bank from your account mapping, category from history/rules (never from the AI)
+      ─► duplicate checks again (ID/UTR, then date+amount+merchant+account)
+      ─► save  — or the existing review queue (pending_imports)
+```
+
+- **What "OCR confident" means:** text alone isn't enough. The existing parser and validation must find the amount, merchant, date and a transaction ID or UTR, with no "₹ read as 2" ambiguity, and the OCR engine's own confidence must be high (`OCR_MIN_CONFIDENCE`, 0.80 average; at least 0.60 on lines containing numbers).
+- **OpenAI is only a fallback.** Confident OCR results and re-shared duplicates never call it. The model must answer in a strict JSON schema, every value is format-checked (amount, date, time, `T…` transaction ID, UTR, 4-digit account), and then the normal validation rules apply. The backend stays authoritative. The request is sent with `store=false`.
+- **Disagreement is never resolved silently:** both readings are kept and the import goes to **review**.
+- **Review** keeps a downscaled copy of the receipt image (in `pending_imports`, served only to you, deleted when you save or discard), so you can check it while correcting the fields. Saved transactions don't keep the image, only the OCR text for debugging.
+- **"Retry all"** on the Import page re-runs stored receipt images through OCR and the fallback.
+- **Logs** show stages, confidence, source and masked IDs only. Never the image, OCR text, full UTRs or account numbers.
+- **Responses** use the same statuses as before (`created` 201, `duplicate` 200, `review_required` 202, `invalid` 422), plus `extraction_source` (`ocr`, `openai_fallback`, or `text` for legacy uploads). Bad uploads get 400 (unsupported/corrupt type), 413 (too big) or 415 (not multipart/JSON).
+- **Performance on Render's free plan:** OCR runs one image at a time, at most 1000 px on the longest side (about 350 MB RAM). Expect a few seconds per receipt on the shared CPU. The engine loads on the first image after a restart.
+
+### Legacy: OCR-text import
+
+The endpoint still accepts the old JSON body `{"ocr_text": "..."}` (text extracted on the phone), so the existing Shortcut keeps working. What happens:
 
 1. **Authenticate**: the `Authorization: Bearer etk_…` token is hashed and looked up. Unknown token → 401.
-2. **Rate limit**: max 30 imports per minute per user (429 otherwise). Requests over 64 KB → 413.
+2. **Rate limit**: max 30 imports per minute per user (429 otherwise). JSON requests over 64 KB → 413 (image uploads: `MAX_UPLOAD_MB`).
 3. **Parse** (`services/phonepe_parser.py`):
    - Cleans the text and finds label lines: *Paid to, Amount, Date, PhonePe Transaction ID, Debited from, UTR, UPI Ref, Message*. Each value is on the same line or within the next 3 lines.
    - Identifiers first (transaction ID, UTR, account, date and time). Their lines are then excluded, so **the amount is never taken from an ID, UTR, account number or date**.
@@ -607,6 +655,13 @@ Run the same command again → HTTP 200, `"status": "duplicate"`.
 | Receipts go to review with "Amount could not be found" | Set `OPENAI_API_KEY` on Render (the AI fallback reads unusual ₹ misreads), then click **Retry all** on the Import page. If one still fails, open it, expand **Raw OCR text**, and add that text as a test case in `tests/test_llm_fallback.py`. |
 | Imports marked AI-assisted are wrong | Edit them, and consider a different `OPENAI_MODEL`. Remove `OPENAI_API_KEY` (or set `LLM_FALLBACK_ENABLED=false`) to always use manual review instead. |
 | Log shows `LLM fallback failed: AuthenticationError` / `RateLimitError` | The OpenAI key is wrong or revoked, or the account has no credit. Imports keep working; they go to review. |
+| Logged out right after deploying the admin version | Expected once: tokens are now tied to server-side sessions. Log in again. |
+| "Access from your network has been blocked" | An admin blocked your IP. Another admin can unblock it, or run `python -m app.cli unblock-ip <ip>` against the database. |
+| Admin console shows every user with the same IP (10.x) | `CLIENT_IP_HEADERS` isn't set or the header isn't arriving. Set it to `true-client-ip,cf-connecting-ip` and check System health → "Your request". |
+| Image imports are slow right after a deploy | The OCR engine loads on the first image (a few seconds), then stays in memory. |
+| Render restarts with "out of memory" during an image import | Lower `OCR_MAX_IMAGE_SIDE` (e.g. 900) or move to a bigger instance. OCR uses about 350 MB at the default 1000 px. |
+| Image imports always use the AI fallback | OCR confidence is below `OCR_MIN_CONFIDENCE` or a field is missing. Open the transaction's "Debug details" to see the OCR text. Very small or blurry screenshots read worse. |
+| Upload rejected with 400 "Unsupported file type" | Only JPEG, PNG and HEIC/HEIF are accepted, detected from the file's bytes (the filename doesn't matter). |
 | Every receipt goes to review | Open the review and expand **Raw OCR text** to see what the iPhone extracted. If PhonePe changed its layout, update the label patterns in `phonepe_parser.py`, add the text as a test in `tests/test_phonepe_parser.py`, and redeploy. |
 | Frontend: "Can't reach the server" | `VITE_API_URL` is wrong or the backend is asleep. Changing `VITE_API_URL` requires redeploying the static site. |
 | Browser console: CORS error | `CORS_ORIGINS` on the backend must exactly match the frontend URL (`https://…onrender.com`, no trailing slash). |
@@ -623,15 +678,17 @@ Run the same command again → HTTP 200, `"status": "duplicate"`.
 
 ## 17. API reference
 
-All endpoints are under `/api`. Everything except `health`, `meta`, `register` and `login` needs `Authorization: Bearer <JWT>`. The PhonePe import also accepts an import token.
+All endpoints are under `/api`. Everything except `health`, `meta`, `register` and `login` needs `Authorization: Bearer <token>`. The admin API (`/api/admin/*`) is documented in [docs/ADMIN.md](docs/ADMIN.md#9-admin-api). The PhonePe import also accepts an import token.
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Health check (also checks the database) |
 | GET | `/meta` | Categories, payment methods, whether registration is open |
 | POST | `/auth/register` | `{email, password, full_name?}` → `{access_token, user}` |
-| POST | `/auth/login` | `{email, password}` → `{access_token, user}` |
-| GET | `/auth/me` | Current user |
+| POST | `/auth/login` | `{email, password}` → `{access_token, user}` (creates a server-side session) |
+| POST | `/auth/logout` | Ends this session on the server |
+| POST | `/auth/change-password` | `{current_password, new_password}`; logs out other devices |
+| GET | `/auth/me` | Current user, incl. `role`, `permissions`, `must_change_password` |
 | GET | `/transactions` | List. Filters: `date, date_from, date_to, month, year, category, bank, payment_method, merchant, search, min_amount, max_amount, source, reimbursable`; `sort_by` (date/amount/merchant/category/created), `sort_order`, `page`, `page_size` (max 100) |
 | GET | `/transactions/filter-options` | Values for filter dropdowns |
 | GET | `/transactions/export.csv` | Same filters as the list (e.g. `?reimbursable=true&year=2026&month=10`) → CSV download with a total row |
@@ -639,7 +696,8 @@ All endpoints are under `/api`. Everything except `health`, `meta`, `register` a
 | POST | `/transactions` | Create (manual) |
 | PUT | `/transactions/{id}` | Update (send only the fields you change) |
 | DELETE | `/transactions/{id}` | Delete → 204 |
-| POST | `/transactions/import/phonepe` | `{ocr_text}` → `created` 201 / `duplicate` 200 / `review_required` 202 / `invalid` 422 |
+| POST | `/transactions/import/phonepe` | **multipart `file=<receipt image>`** (JPEG/PNG/HEIC) or legacy JSON `{ocr_text}` → `created` 201 / `duplicate` 200 / `review_required` 202 / `invalid` 422, with `extraction_source` |
+| GET | `/imports/pending/{id}/image` | The stored receipt image of an image import awaiting review (owner only, `no-store`) |
 | GET | `/imports/pending` | Imports waiting for review |
 | POST | `/imports/pending/reprocess` | Re-run all pending imports through the latest parser + AI fallback → `{created, duplicate, review_required, invalid}` |
 | GET | `/imports/pending/{id}` | One pending import (with raw text) |
@@ -662,6 +720,9 @@ The import pipeline doesn't depend on PhonePe:
 ```
 services/
   parsing.py              # ParsedTransaction + ParseResult: the common format
+  receipt_image.py        # upload validation: type from file bytes, HEIC decoding, size limits
+  phonepe_ocr.py          # server-side OCR (RapidOCR) → text + confidence
+  phonepe_vision.py       # OpenAI Vision fallback (structured JSON, validated)
   phonepe_parser.py       # PhonePe receipt OCR → ParseResult
   llm_extractor.py        # optional AI fallback (redacted input, verified output)
   transaction_importer.py # generic pipeline + PARSERS registry

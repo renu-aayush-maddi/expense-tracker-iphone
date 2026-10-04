@@ -65,8 +65,8 @@ LABELS: dict[str, re.Pattern] = {
 # ---------------------------------------------------------------------------
 # Value patterns
 # ---------------------------------------------------------------------------
-# ₹ plus the symbols OCR commonly turns it into.
-CURRENCY_MARKER = r"(?:₹|¥|円|₨|€|£|\$|\bRs\.?|\bRe\.?|\bINR\b)"
+# ₹ plus the symbols OCR commonly turns it into ("□" = server OCR's "unknown glyph" box).
+CURRENCY_MARKER = r"(?:₹|¥|円|₨|€|£|□|\$|\bRs\.?|\bRe\.?|\bINR\b)"
 # At most 9 integer digits, so long IDs/UTRs/account numbers can never look like an amount.
 NUMBER = r"(?:\d{1,3}(?:,\d{2,3})+|\d{1,9})(?:\.\d{1,2})?(?!\d)"
 MARKED_AMOUNT_RE = re.compile(CURRENCY_MARKER + r"\s*(" + NUMBER + r")", re.I)
